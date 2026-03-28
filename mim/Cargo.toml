@@ -1,0 +1,16 @@
+[package]
+name = "mim"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["openai"]
+openai = ["agent/openai"]
+
+[dependencies]
+agent = { path = "../agent" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+futures = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

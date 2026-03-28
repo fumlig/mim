@@ -3,4 +3,11 @@ name = "agent"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+openai = ["dep:async-openai"]
+
 [dependencies]
+async-openai = { version = "0.34", features = ["responses"], optional = true }
+futures = "0.3.32"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1.44"

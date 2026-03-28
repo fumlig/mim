@@ -1,7 +1,3 @@
 [workspace]
-members = [
-    "agent",
-    "index",
-    "command",
-]
+members = ["mim", "agent"]
 resolver = "2"
