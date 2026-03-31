@@ -19,3 +19,4 @@ serde = { version = "1", features = ["derive"] }
 schemars = "1.2.1"
 chrono = "0.4"
 chrono-tz = "0.10"
+reedline = "0.46.0"

@@ -1,26 +1,24 @@
-use agent::{
-    provider::{openai::OpenAIProvider, ResponseEvent},
-    session::Session,
-    tool::{function_tool, Tool},
-    Agent,
-};
 use anyhow::Result;
 use chrono::Utc;
 use chrono_tz::Tz;
 use clap::Parser;
+use reedline::{DefaultPrompt, Reedline, Signal};
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::Deserialize;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
+use agent::{
+    provider::{openai::OpenAIProvider, Provider, ResponseEvent},
+    session::Session,
+    tool::{function_tool, Tool},
+    Agent, Cancel,
+};
+
 #[derive(Parser, Debug)]
 #[command(name = "mim", version)]
 struct Args {
-    /// The input to send to the model
-    #[arg(required = true)]
-    input: String,
-
     /// Model to use
     #[arg(short, long, env = "MIM_MODEL")]
     model: String,
@@ -60,7 +58,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let Args { input, model } = Args::parse();
+    let Args { model } = Args::parse();
 
     let provider = OpenAIProvider::new();
 
@@ -69,21 +67,56 @@ async fn main() -> Result<()> {
 
     let mut agent = Agent::new(provider, model, tools, session);
 
-    agent
-        .run(&input, |event| match event {
-            ResponseEvent::TextDelta(text) => print!("{text}"),
-            ResponseEvent::ReasoningDelta(text) => eprint!("{text}"),
-            ResponseEvent::ToolCall(tc) => {
-                eprintln!("[tool call: {} args={}]", tc.name, tc.arguments);
-            }
-            ResponseEvent::ToolResult(result) => {
-                eprintln!("[tool result for {}: {}]", result.call_id, result.output);
-            }
-            _ => {}
-        })
-        .await?;
+    let mut line_editor = Reedline::create();
+    let prompt = DefaultPrompt::default();
 
-    println!();
+    loop {
+        let sig = line_editor.read_line(&prompt)?;
+        let input = match sig {
+            Signal::Success(buffer) => buffer,
+            Signal::CtrlD | Signal::CtrlC => {
+                println!("aborted");
+                break;
+            }
+        };
+
+        let cancel = Cancel::new();
+        let signal_task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                // 1st Ctrl+C: cancel the current response
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    cancel.cancel();
+                }
+                // 2nd Ctrl+C: exit the process
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    std::process::exit(0);
+                }
+            }
+        });
+
+        agent
+            .run(
+                &input,
+                cancel,
+                |event| match event {
+                    ResponseEvent::TextDelta(text) => print!("{text}"),
+                    ResponseEvent::ReasoningDelta(text) => eprint!("{text}"),
+                    ResponseEvent::ToolCall(tc) => {
+                        eprintln!("[tool call: {} args={}]", tc.name, tc.arguments);
+                    }
+                    ResponseEvent::ToolResult(result) => {
+                        eprintln!("[tool result for {}: {}]", result.call_id, result.output);
+                    }
+                    _ => {}
+                },
+            )
+            .await?;
+
+        signal_task.abort();
+
+        println!();
+    }
 
     Ok(())
 }
