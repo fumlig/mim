@@ -7,7 +7,11 @@ edition = "2021"
 openai = ["dep:async-openai"]
 
 [dependencies]
+anyhow = "1.0.102"
 async-openai = { version = "0.34", features = ["responses"], optional = true }
 futures = "0.3.32"
+schemars = "1.2.1"
+serde = "1.0.228"
+serde_json = "1.0.149"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.44"
