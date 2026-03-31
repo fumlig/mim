@@ -28,14 +28,14 @@ impl From<&entry::Entry> for InputItem {
                         .content
                         .iter()
                         .map(|c| match c {
-                            entry::MessageContent::Text(text) => {
+                            entry::MessageContent::Text { text } => {
                                 OutputMessageContent::OutputText(OutputTextContent {
                                     annotations: vec![],
                                     logprobs: None,
                                     text: text.clone(),
                                 })
                             }
-                            entry::MessageContent::Refusal(text) => {
+                            entry::MessageContent::Refusal { text } => {
                                 OutputMessageContent::Refusal(RefusalContent {
                                     refusal: text.clone(),
                                 })
@@ -66,7 +66,7 @@ impl From<&entry::Entry> for InputItem {
                         .content
                         .iter()
                         .filter_map(|c| match c {
-                            entry::MessageContent::Text(text) => {
+                            entry::MessageContent::Text { text } => {
                                 Some(InputContent::InputText(InputTextContent {
                                     text: text.clone(),
                                 }))
@@ -232,10 +232,14 @@ impl Provider for OpenAIProvider {
                             .iter()
                             .map(|c| match c {
                                 OutputMessageContent::OutputText(t) => {
-                                    entry::MessageContent::Text(t.text.clone())
+                                    entry::MessageContent::Text {
+                                        text: t.text.clone(),
+                                    }
                                 }
                                 OutputMessageContent::Refusal(r) => {
-                                    entry::MessageContent::Refusal(r.refusal.clone())
+                                    entry::MessageContent::Refusal {
+                                        text: r.refusal.clone(),
+                                    }
                                 }
                             })
                             .collect();

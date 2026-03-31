@@ -6,11 +6,11 @@ use reedline::{DefaultPrompt, Reedline, Signal};
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 use agent::{
-    provider::{openai::OpenAIProvider, Provider, ResponseEvent},
+    provider::{openai::OpenAIProvider, ResponseEvent},
     session::Session,
     tool::{function_tool, Tool},
     Agent, Cancel,
@@ -22,6 +22,31 @@ struct Args {
     /// Model to use
     #[arg(short, long, env = "MIM_MODEL")]
     model: String,
+
+    /// Root .mim directory. Defaults to nearest .mim in an ancestor, or ./.mim
+    #[arg(short, long, env = "MIM_PATH")]
+    path: Option<PathBuf>,
+
+    /// Session file to resume (resolved under <mim_path>/sessions/).
+    /// Defaults to <timestamp>.jsonl
+    #[arg(short, long)]
+    session: Option<PathBuf>,
+}
+
+/// Walk from `start` upward looking for a `.mim` directory.
+/// Returns the first one found, or `<start>/.mim` as fallback.
+fn resolve_mim_path(start: &Path) -> PathBuf {
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join(".mim");
+        if candidate.is_dir() {
+            return candidate;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    start.join(".mim")
 }
 
 fn make_tools() -> Result<Vec<Tool>> {
@@ -58,14 +83,26 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let Args { model } = Args::parse();
+    let args = Args::parse();
+
+    let cwd = std::env::current_dir()?;
+    let mim_path = args.path.unwrap_or_else(|| resolve_mim_path(&cwd));
+
+    let session_name = args.session.unwrap_or_else(|| {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        PathBuf::from(format!("{ts}.jsonl"))
+    });
+    let session_path = mim_path.join("sessions").join(session_name);
+
+    eprintln!("mim:     {}", mim_path.display());
+    eprintln!("session: {}", session_path.display());
 
     let provider = OpenAIProvider::new();
 
     let tools = make_tools()?;
-    let session = Session::new(PathBuf::from("session.json"));
+    let session = Session::open(session_path)?;
 
-    let mut agent = Agent::new(provider, model, tools, session);
+    let mut agent = Agent::new(provider, args.model, tools, session);
 
     let mut line_editor = Reedline::create();
     let prompt = DefaultPrompt::default();
@@ -96,21 +133,17 @@ async fn main() -> Result<()> {
         });
 
         agent
-            .run(
-                &input,
-                cancel,
-                |event| match event {
-                    ResponseEvent::TextDelta(text) => print!("{text}"),
-                    ResponseEvent::ReasoningDelta(text) => eprint!("{text}"),
-                    ResponseEvent::ToolCall(tc) => {
-                        eprintln!("[tool call: {} args={}]", tc.name, tc.arguments);
-                    }
-                    ResponseEvent::ToolResult(result) => {
-                        eprintln!("[tool result for {}: {}]", result.call_id, result.output);
-                    }
-                    _ => {}
-                },
-            )
+            .run(&input, cancel, |event| match event {
+                ResponseEvent::TextDelta(text) => print!("{text}"),
+                ResponseEvent::ReasoningDelta(text) => eprint!("{text}"),
+                ResponseEvent::ToolCall(tc) => {
+                    eprintln!("[tool call: {} args={}]", tc.name, tc.arguments);
+                }
+                ResponseEvent::ToolResult(result) => {
+                    eprintln!("[tool result for {}: {}]", result.call_id, result.output);
+                }
+                _ => {}
+            })
             .await?;
 
         signal_task.abort();

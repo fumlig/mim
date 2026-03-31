@@ -61,7 +61,9 @@ where
     {
         self.session.append(Entry::Message(Message {
             role: Role::User,
-            content: vec![MessageContent::Text(input.to_string())],
+            content: vec![MessageContent::Text {
+                text: input.to_string(),
+            }],
         }));
 
         loop {

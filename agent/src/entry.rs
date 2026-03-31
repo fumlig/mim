@@ -1,18 +1,21 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ImageSource {
-    Url(String), // https://... or data:image/...;base64,...
+    Url { url: String },
     Base64 { media_type: String, data: Vec<u8> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum FileSource {
-    Url(String),
+    Url { url: String },
     Base64 { filename: String, data: Vec<u8> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
@@ -20,40 +23,40 @@ pub enum Role {
     Developer,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum MessageContent {
-    Text(String),
-    Image(ImageSource),
-    File(FileSource),
-    // Output-only: model refused to answer
-    Refusal(String),
+    Text { text: String },
+    Image { source: ImageSource },
+    File { source: FileSource },
+    Refusal { text: String },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<MessageContent>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     pub arguments: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolResult {
     pub call_id: String,
     pub output: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReasoningContent {
     pub text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reasoning {
     pub id: String,
     pub summary: Vec<String>,
@@ -61,12 +64,13 @@ pub struct Reasoning {
     pub encrypted_content: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Compaction {
     pub encrypted_content: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "entry")]
 pub enum Entry {
     Message(Message),
     ToolCall(ToolCall),
