@@ -1,12 +1,15 @@
+mod context;
+
 use anyhow::Result;
 use chrono::Utc;
 use chrono_tz::Tz;
 use clap::Parser;
+use context::Context;
 use reedline::{DefaultPrompt, Reedline, Signal};
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 use agent::{
@@ -26,27 +29,6 @@ struct Args {
     /// Root .mim directory. Defaults to nearest .mim in an ancestor, or ./.mim
     #[arg(short, long, env = "MIM_PATH")]
     path: Option<PathBuf>,
-
-    /// Session file to resume (resolved under <mim_path>/sessions/).
-    /// Defaults to <timestamp>.jsonl
-    #[arg(short, long)]
-    session: Option<PathBuf>,
-}
-
-/// Walk from `start` upward looking for a `.mim` directory.
-/// Returns the first one found, or `<start>/.mim` as fallback.
-fn resolve_mim_path(start: &Path) -> PathBuf {
-    let mut dir = start.to_path_buf();
-    loop {
-        let candidate = dir.join(".mim");
-        if candidate.is_dir() {
-            return candidate;
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    start.join(".mim")
 }
 
 fn make_tools() -> Result<Vec<Tool>> {
@@ -85,22 +67,14 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let cwd = std::env::current_dir()?;
-    let mim_path = args.path.unwrap_or_else(|| resolve_mim_path(&cwd));
+    let ctx = Context::new(args.path)?;
 
-    let session_name = args.session.unwrap_or_else(|| {
-        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        PathBuf::from(format!("{ts}.jsonl"))
-    });
-    let session_path = mim_path.join("sessions").join(session_name);
-
-    eprintln!("mim:     {}", mim_path.display());
-    eprintln!("session: {}", session_path.display());
+    eprintln!("mim:     {}", ctx.root.display());
+    eprintln!("session: {}", ctx.session_path.display());
 
     let provider = OpenAIProvider::new();
-
     let tools = make_tools()?;
-    let session = Session::open(session_path)?;
+    let session = Session::open(ctx.session_path)?;
 
     let mut agent = Agent::new(provider, args.model, tools, session);
 
