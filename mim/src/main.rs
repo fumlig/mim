@@ -7,7 +7,7 @@ use chrono_tz::Tz;
 use clap::Parser;
 use context::Context;
 use reedline::{DefaultPrompt, Reedline, Signal};
-use render::MarkdownRenderer;
+use render::{render_markdown, Live};
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::Deserialize;
@@ -109,15 +109,19 @@ async fn main() -> Result<()> {
             }
         });
 
-        let mut md = MarkdownRenderer::new(MadSkin::default());
+        let mut live = Live::new();
+        let skin = MadSkin::default();
+        let mut md_buf = String::new();
         let mut got_reasoning_deltas = false;
         agent
             .run(&input, cancel, |event| match event {
                 ResponseEvent::TextDelta(text) => {
-                    md.push(&text).ok();
+                    md_buf.push_str(&text);
+                    live.update(&render_markdown(&skin, &md_buf)).ok();
                 }
                 ResponseEvent::TextDone(_) => {
-                    md.finish().ok();
+                    live.finish().ok();
+                    md_buf.clear();
                 }
                 ResponseEvent::ReasoningDelta(text) => {
                     got_reasoning_deltas = true;
