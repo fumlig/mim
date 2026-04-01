@@ -2,20 +2,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
     Url { url: String },
     Base64 { media_type: String, data: Vec<u8> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum FileSource {
     Url { url: String },
     Base64 { filename: String, data: Vec<u8> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
@@ -24,7 +25,7 @@ pub enum Role {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageContent {
     Text { text: String },
     Image { source: ImageSource },
@@ -70,7 +71,7 @@ pub struct Compaction {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "entry")]
+#[serde(tag = "entry", rename_all = "snake_case")]
 pub enum Entry {
     Message(Message),
     ToolCall(ToolCall),

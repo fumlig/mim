@@ -183,10 +183,11 @@ impl Provider for OpenAIProvider {
 
         let mapped = stream.filter_map(|result| async {
             match result {
-                // Reasoning delta
-                Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(e)) => {
+                // Reasoning deltas (content = full thinking, summary = condensed)
+                Ok(ResponseStreamEvent::ResponseReasoningTextDelta(e)) => {
                     Some(Ok(ResponseEvent::ReasoningDelta(e.delta)))
                 }
+                Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(_)) => None,
 
                 // Text output delta
                 Ok(ResponseStreamEvent::ResponseOutputTextDelta(e)) => {

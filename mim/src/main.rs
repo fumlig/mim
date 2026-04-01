@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::Deserialize;
 use std::path::PathBuf;
+use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 use agent::{
@@ -38,10 +39,10 @@ fn make_tools() -> Result<Vec<Tool>> {
         timezone: String,
     }
 
-    let get_current_time = function_tool::<GetCurrentTimeParams, _, _>(
+    let get_current_time = function_tool(
         "get_current_time".into(),
         "Get the current date and time in a given IANA time zone (e.g. \"America/New_York\", \"Europe/Berlin\", \"UTC\").".into(),
-        |params| {
+        |params: GetCurrentTimeParams| {
             let tz: Tz = params
                 .timezone
                 .parse()
@@ -69,8 +70,7 @@ async fn main() -> Result<()> {
 
     let ctx = Context::new(args.path)?;
 
-    eprintln!("mim:     {}", ctx.root.display());
-    eprintln!("session: {}", ctx.session_path.display());
+    debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
 
     let provider = OpenAIProvider::new();
     let tools = make_tools()?;
@@ -106,15 +106,33 @@ async fn main() -> Result<()> {
             }
         });
 
+        let mut got_reasoning_deltas = false;
         agent
             .run(&input, cancel, |event| match event {
-                ResponseEvent::TextDelta(text) => print!("{text}"),
-                ResponseEvent::ReasoningDelta(text) => eprint!("{text}"),
+                ResponseEvent::TextDelta(text) => {
+                    print!("{text}");
+                }
+                ResponseEvent::ReasoningDelta(text) => {
+                    got_reasoning_deltas = true;
+                    eprint!("{text}");
+                }
+                ResponseEvent::ReasoningDone(r) => {
+                    // If the server didn't stream reasoning deltas, print
+                    // the completed content so reasoning is still visible.
+                    if !got_reasoning_deltas {
+                        if let Some(parts) = &r.content {
+                            for part in parts {
+                                eprint!("{}", part.text);
+                            }
+                        }
+                    }
+                    got_reasoning_deltas = false;
+                }
                 ResponseEvent::ToolCall(tc) => {
-                    eprintln!("[tool call: {} args={}]", tc.name, tc.arguments);
+                    println!("[tool call: {} args={}]", tc.name, tc.arguments);
                 }
                 ResponseEvent::ToolResult(result) => {
-                    eprintln!("[tool result for {}: {}]", result.call_id, result.output);
+                    println!("[tool result for {}: {}]", result.call_id, result.output);
                 }
                 _ => {}
             })
