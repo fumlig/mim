@@ -1,4 +1,5 @@
 mod context;
+mod render;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -6,10 +7,12 @@ use chrono_tz::Tz;
 use clap::Parser;
 use context::Context;
 use reedline::{DefaultPrompt, Reedline, Signal};
+use render::MarkdownRenderer;
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::Deserialize;
 use std::path::PathBuf;
+use termimad::MadSkin;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
@@ -106,11 +109,15 @@ async fn main() -> Result<()> {
             }
         });
 
+        let mut md = MarkdownRenderer::new(MadSkin::default());
         let mut got_reasoning_deltas = false;
         agent
             .run(&input, cancel, |event| match event {
                 ResponseEvent::TextDelta(text) => {
-                    print!("{text}");
+                    md.push(&text).ok();
+                }
+                ResponseEvent::TextDone(_) => {
+                    md.finish().ok();
                 }
                 ResponseEvent::ReasoningDelta(text) => {
                     got_reasoning_deltas = true;
