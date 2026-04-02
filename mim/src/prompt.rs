@@ -9,10 +9,14 @@ use crate::width::visible_width;
 pub enum PromptAction {
     /// User pressed Enter — contains the submitted text.
     Submit(String),
-    /// Ctrl+C — interrupt.
-    CtrlC,
     /// Ctrl+D on empty prompt — end of input.
-    CtrlD,
+    Eof,
+    /// Ctrl+C — interrupt.
+    Interrupt,
+    /// Ctrl+Z — suspend process.
+    Suspend,
+    /// Ctrl+\ — quit with core dump.
+    Quit,
 }
 
 /// Single-line input prompt with cursor and horizontal scrolling.
@@ -52,13 +56,19 @@ impl Prompt {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         match key.code {
-            KeyCode::Char('c') if ctrl => {
-                return Some(PromptAction::CtrlC);
-            }
             KeyCode::Char('d') if ctrl => {
                 if self.buf.is_empty() {
-                    return Some(PromptAction::CtrlD);
+                    return Some(PromptAction::Eof);
                 }
+            }
+            KeyCode::Char('c') if ctrl => {
+                return Some(PromptAction::Interrupt);
+            }
+            KeyCode::Char('z') if ctrl => {
+                return Some(PromptAction::Suspend);
+            }
+            KeyCode::Char('\\') if ctrl => {
+                return Some(PromptAction::Quit);
             }
             KeyCode::Enter if !ctrl => {
                 let text: String = self.buf.drain(..).collect();

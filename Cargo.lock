@@ -1051,6 +1051,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
+ "libc",
  "rand 0.10.0",
  "schemars",
  "serde",

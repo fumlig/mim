@@ -114,6 +114,41 @@ impl Screen {
         stdout.flush()
     }
 
+    /// Suspend the process (Ctrl+Z).
+    ///
+    /// Restores the terminal, sends `SIGTSTP` to ourselves, and re-enters
+    /// raw mode when the shell resumes us with `fg`.
+    pub fn suspend(&mut self) -> io::Result<()> {
+        self.leave()?;
+
+        #[cfg(unix)]
+        unsafe {
+            libc::raise(libc::SIGTSTP);
+        }
+
+        // Resumed — re-enter raw mode and force full redraw.
+        crossterm::terminal::enable_raw_mode()?;
+        crossterm::execute!(io::stdout(), Hide)?;
+        self.active = true;
+        self.last_frame = None;
+        self.cursor_row = 0;
+        Ok(())
+    }
+
+    /// Quit the process with `SIGQUIT` (Ctrl+\).
+    ///
+    /// Restores the terminal first so the shell isn't left in a broken state.
+    pub fn quit(&mut self) -> io::Result<()> {
+        self.leave()?;
+
+        #[cfg(unix)]
+        unsafe {
+            libc::raise(libc::SIGQUIT);
+        }
+
+        Ok(())
+    }
+
     /// Wait for the next crossterm event asynchronously.
     pub async fn event(&mut self) -> io::Result<Event> {
         self.events.next().await.unwrap_or_else(|| {

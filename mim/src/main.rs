@@ -47,6 +47,10 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    run(args).await
+}
+
+async fn run(args: Args) -> Result<()> {
     let ctx = Context::new(args.path)?;
 
     debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
@@ -57,12 +61,6 @@ async fn main() -> Result<()> {
 
     let mut agent = Agent::new(provider, args.model, tools, session);
 
-    run().await?;
-
-    Ok(())
-}
-
-async fn run() -> Result<()> {
     let mut screen = Screen::new()?;
     let mut prompt = Prompt::new("> ");
     let mut spinner = Spinner::new(spinner::SpinnerVariant::Line);
@@ -88,7 +86,9 @@ async fn run() -> Result<()> {
 
         match action {
             PromptAction::Submit(text) => lines.push(text),
-            PromptAction::CtrlC | PromptAction::CtrlD => break,
+            PromptAction::Suspend => screen.suspend()?,
+            PromptAction::Quit => screen.quit()?,
+            PromptAction::Interrupt | PromptAction::Eof => break,
         }
     }
 
