@@ -74,7 +74,10 @@ impl Prompt {
                 }
             }
             KeyCode::Char('c') if ctrl => {
-                return Some(PromptAction::Interrupt);
+                if self.buf.is_empty() {
+                    return Some(PromptAction::Interrupt);
+                }
+                self.clear();
             }
             KeyCode::Char('z') if ctrl => {
                 return Some(PromptAction::Suspend);

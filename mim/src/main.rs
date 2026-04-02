@@ -144,10 +144,8 @@ async fn run(args: Args) -> Result<()> {
                     PromptAction::Interrupt => {
                         if let Some(cancel) = current_cancel.take() {
                             cancel.cancel();
-                        } else if prompt.is_empty() {
-                            break;
                         } else {
-                            prompt.clear();
+                            break;
                         }
                     }
                     PromptAction::Suspend => screen.suspend()?,
