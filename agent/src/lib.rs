@@ -50,12 +50,7 @@ where
     /// Loops automatically when the model requests tool calls.
     /// If the `cancel` token is triggered, the current stream and any
     /// remaining tool calls are abandoned and the method returns `Ok(())`.
-    pub async fn run<F>(
-        &mut self,
-        input: &str,
-        cancel: Cancel,
-        mut on_event: F,
-    ) -> Result<(), anyhow::Error>
+    pub async fn run<F>(&mut self, input: &str, mut on_event: F) -> Result<(), anyhow::Error>
     where
         F: FnMut(ResponseEvent),
     {
@@ -75,44 +70,30 @@ where
 
             let mut pending_entries: Vec<Entry> = Vec::new();
             let mut pending_tool_calls: Vec<entry::ToolCall> = Vec::new();
-            let mut cancelled = false;
 
-            loop {
-                tokio::select! {
-                    event = stream.next() => {
-                        let Some(event) = event else { break };
-                        let event = event.map_err(|e| anyhow::anyhow!("{e}"))?;
+            while let Some(result) = stream.next().await {
+                let event = result.map_err(|e| anyhow::anyhow!("{e}"))?;
 
-                        match &event {
-                            ResponseEvent::TextDone(msg) => {
-                                pending_entries.push(Entry::Message(msg.clone()));
-                            }
-                            ResponseEvent::ReasoningDone(r) => {
-                                pending_entries.push(Entry::Reasoning(r.clone()));
-                            }
-                            ResponseEvent::ToolCall(tc) => {
-                                pending_entries.push(Entry::ToolCall(tc.clone()));
-                                pending_tool_calls.push(tc.clone());
-                            }
-                            _ => {}
-                        }
-
-                        on_event(event);
+                match &event {
+                    ResponseEvent::TextDone(msg) => {
+                        pending_entries.push(Entry::Message(msg.clone()));
                     }
-                    _ = cancel.cancelled() => {
-                        cancelled = true;
-                        break;
+                    ResponseEvent::ReasoningDone(r) => {
+                        pending_entries.push(Entry::Reasoning(r.clone()));
                     }
+                    ResponseEvent::ToolCall(tc) => {
+                        pending_entries.push(Entry::ToolCall(tc.clone()));
+                        pending_tool_calls.push(tc.clone());
+                    }
+                    _ => {}
                 }
+
+                on_event(event);
             }
 
             // Append all accumulated entries to the session in stream order.
             for entry in pending_entries {
                 self.session.append(entry);
-            }
-
-            if cancelled {
-                return Ok(());
             }
 
             // If no tool calls were requested, we're done.
@@ -122,10 +103,6 @@ where
 
             // Execute all tool calls and append results.
             for tc in &pending_tool_calls {
-                if cancel.is_cancelled() {
-                    return Ok(());
-                }
-
                 let tool = self
                     .tools
                     .get(&tc.name)
