@@ -9,8 +9,8 @@ use crossterm::{
 };
 use futures::StreamExt;
 
-use crate::widget::Widget;
 use crate::format::truncate_to_width;
+use crate::widget::Widget;
 
 /// Per-render frame. Accumulates lines from widgets and raw text.
 /// Created by [`Renderer::begin`], consumed by [`Renderer::end`].
@@ -44,7 +44,7 @@ impl Frame {
     }
 
     /// Append a widget's rendered lines.
-    pub fn add(&mut self, widget: &dyn Widget) {
+    pub fn add(&mut self, widget: &mut impl Widget) {
         self.lines.extend(widget.render(self.width));
     }
 
@@ -52,7 +52,7 @@ impl Frame {
     ///
     /// Only one widget per frame should be focused. The terminal's hardware
     /// cursor will be placed at the position reported by [`Widget::cursor`].
-    pub fn add_focused(&mut self, widget: &dyn Widget) {
+    pub fn add_focused(&mut self, widget: &mut impl Widget) {
         let base_row = self.lines.len();
         // Render first so the widget can update internal layout state
         // (e.g. scroll offset) before we query cursor position.
@@ -202,7 +202,12 @@ impl Screen {
     /// Render everything from the top
     fn full_render(&mut self, out: &mut impl Write, next: &Frame, clear: bool) -> io::Result<()> {
         if clear {
-            queue!(out, Clear(ClearType::All), crossterm::cursor::MoveTo(0, 0))?;
+            queue!(
+                out,
+                Clear(ClearType::All),           // ESC[2J — clear visible screen
+                crossterm::cursor::MoveTo(0, 0), // ESC[H  — cursor home
+                Clear(ClearType::Purge),         // ESC[3J — clear scrollback
+            )?;
         }
         Self::write_lines(out, &next.lines, next.width)?;
         self.cursor_row = next.lines.len().saturating_sub(1);

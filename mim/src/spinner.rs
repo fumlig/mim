@@ -1,50 +1,39 @@
 use crate::widget::Widget;
 
-/// A set of frames that define a spinner animation.
-#[derive(Debug, Clone, Copy)]
-pub enum SpinnerVariant {
-    /// Classic rotating line: | / - \
-    Line,
-}
-
-impl SpinnerVariant {
-    /// Returns the frames for this variant.
-    fn frames(self) -> &'static [&'static str] {
-        match self {
-            SpinnerVariant::Line => &["|", "/", "-", "\\"],
-        }
-    }
-}
-
 /// A simple character spinner that cycles through animation frames.
 pub struct Spinner {
-    variant: SpinnerVariant,
-    index: usize,
+    frames: Box<dyn Iterator<Item = &'static str>>,
+    current: &'static str,
 }
 
 impl Spinner {
-    /// Creates a new spinner with the given variant.
-    pub fn new(variant: SpinnerVariant) -> Self {
-        Self { variant, index: 0 }
+    pub const ASCII: &[&str] = &["|", "/", "-", "\\"];
+
+    /// Creates a new spinner with the given style.
+    pub fn new(frames: &'static [&'static str]) -> Self {
+        let mut iter = frames.iter().copied().cycle();
+        let current = iter.next().unwrap();
+        Self {
+            frames: Box::new(iter),
+            current,
+        }
     }
 
     /// Returns the current frame without advancing.
-    fn get(&self) -> &'static str {
-        let frames = self.variant.frames();
-        frames[self.index]
+    pub fn get(&self) -> &str {
+        self.current
     }
 
     /// Advances the spinner by one step and returns the new frame.
-    pub fn step(&mut self) -> &'static str {
-        let frames = self.variant.frames();
-        self.index = (self.index + 1) % frames.len();
-        frames[self.index]
+    pub fn step(&mut self) -> &str {
+        self.current = self.frames.next().unwrap();
+        self.current
     }
 }
 
 impl Widget for Spinner {
-    fn render(&self, _: u16) -> Vec<String> {
-        vec![self.get().into()]
+    fn render(&mut self, _: u16) -> Vec<String> {
+        vec![self.current.to_string()]
     }
 }
 
@@ -53,8 +42,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn line_cycles_through_frames() {
-        let mut s = Spinner::new(SpinnerVariant::Line);
+    fn cycles_through_frames() {
+        let mut s = Spinner::new(Spinner::ASCII);
         assert_eq!(s.get(), "|");
         assert_eq!(s.step(), "/");
         assert_eq!(s.step(), "-");

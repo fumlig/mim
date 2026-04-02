@@ -1,7 +1,8 @@
+mod border;
 mod context;
+mod editor;
 mod format;
 mod message;
-mod prompt;
 mod screen;
 mod spinner;
 mod tool;
@@ -21,10 +22,12 @@ use agent::{
 };
 use tokio::sync::mpsc;
 
-use crate::message::MessageBlock;
-use crate::prompt::{Prompt, PromptAction};
+use crate::border::Border;
+use crate::editor::{Editor, EditorAction};
+use crate::message::Message;
 use crate::screen::Screen;
-use crate::spinner::{Spinner, SpinnerVariant};
+use crate::spinner::Spinner;
+use crate::widget::WidgetExt;
 
 #[derive(Parser, Debug)]
 #[command(name = "mim", version)]
@@ -113,23 +116,31 @@ async fn run(args: Args) -> Result<()> {
     tokio::spawn(agent_task(agent, input_rx, output_tx));
 
     let mut screen = Screen::new()?;
-    let mut prompt = Prompt::new("> ");
-    let mut blocks: Vec<MessageBlock> = Vec::new();
+    let mut prompt = Editor::new();
+    let mut blocks: Vec<Message> = Vec::new();
     let mut current_cancel: Option<Cancel> = None;
-    let mut spinner = Spinner::new(SpinnerVariant::Line);
+    let mut spinner = Spinner::new(Spinner::ASCII);
 
     loop {
         let mut frame = screen.begin()?;
-        for (i, block) in blocks.iter().enumerate() {
+        for (i, block) in blocks.iter_mut().enumerate() {
             if i > 0 {
                 frame.add_line(String::new());
             }
             frame.add(block);
         }
         if current_cancel.is_some() {
-            frame.add(&spinner);
+            frame.add(&mut spinner);
         }
-        frame.add_focused(&prompt);
+        {
+            frame.add_focused(
+                &mut prompt
+                    .pad(0, 0, 0, 1)
+                    .line_numbers(2)
+                    .ascii()
+                    .pad(1, 0, 0, 0),
+            );
+        }
         screen.end(frame)?;
 
         tokio::select! {
@@ -138,26 +149,26 @@ async fn run(args: Args) -> Result<()> {
                     continue;
                 };
                 match action {
-                    PromptAction::Submit(text) => {
+                    EditorAction::Submit(text) => {
                         let _ = input_tx.send(text).await;
                     }
-                    PromptAction::Interrupt => {
+                    EditorAction::Interrupt => {
                         if let Some(cancel) = current_cancel.take() {
                             cancel.cancel();
                         } else {
                             break;
                         }
                     }
-                    PromptAction::Suspend => screen.suspend()?,
-                    PromptAction::Quit => screen.quit()?,
-                    PromptAction::Eof => break,
+                    EditorAction::Suspend => screen.suspend()?,
+                    EditorAction::Quit => screen.quit()?,
+                    EditorAction::Eof => break,
                 }
             }
             Some(output) = output_rx.recv() => {
                 match output {
                     AgentOutput::Starting { text, cancel } => {
-                        blocks.push(MessageBlock::user(&text));
-                        blocks.push(MessageBlock::assistant());
+                        blocks.push(Message::user(&text));
+                        blocks.push(Message::assistant());
                         current_cancel = Some(cancel);
                     }
                     AgentOutput::Event(event) => {

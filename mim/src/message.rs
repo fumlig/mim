@@ -1,6 +1,7 @@
 use agent::provider::ResponseEvent;
 
-use crate::format::{prefix_lines, wrap_text};
+use crate::border::Border;
+use crate::format::wrap_text;
 use crate::widget::Widget;
 
 pub enum Role {
@@ -8,12 +9,12 @@ pub enum Role {
     Assistant,
 }
 
-pub struct MessageBlock {
+pub struct Message {
     role: Role,
     text: String,
 }
 
-impl MessageBlock {
+impl Message {
     pub fn user(text: &str) -> Self {
         Self {
             role: Role::User,
@@ -57,26 +58,40 @@ impl MessageBlock {
             self.text.push('\n');
         }
     }
+
+    fn prefix(&self) -> &'static str {
+        match self.role {
+            Role::User => "> ",
+            Role::Assistant => "| ",
+        }
+    }
 }
 
-impl Widget for MessageBlock {
-    fn render(&self, width: u16) -> Vec<String> {
-        if self.text.is_empty() {
-            return vec![];
-        }
+/// Helper widget that word-wraps pre-existing text.
+struct WrappedText<'a> {
+    text: &'a str,
+}
 
+impl Widget for WrappedText<'_> {
+    fn render(&mut self, width: u16) -> Vec<String> {
         let w = width as usize;
         if w == 0 {
             return vec![];
         }
+        wrap_text(self.text, w, "-")
+    }
+}
 
-        let (prefix, indent) = match self.role {
-            Role::User => ("> ", "  "),
-            Role::Assistant => ("", ""),
-        };
-        let wrap_w = w.saturating_sub(prefix.len()).max(1);
-        let lines = wrap_text(&self.text, wrap_w, "-");
-        prefix_lines(&lines, prefix, indent)
+impl Widget for Message {
+    fn render(&mut self, width: u16) -> Vec<String> {
+        if self.text.is_empty() {
+            return vec![];
+        }
+
+        let prefix = self.prefix();
+        let mut content = WrappedText { text: &self.text };
+        let mut border = Border::new(&mut content).left(prefix, prefix.len());
+        border.render(width)
     }
 }
 
@@ -86,25 +101,28 @@ mod tests {
 
     #[test]
     fn user_render() {
-        let block = MessageBlock::user("hello world this is a test");
-        let lines = block.render(20);
-        assert_eq!(lines[0], "> hello world this");
-        assert_eq!(lines[1], "  is a test");
+        let mut msg = Message::user("hello world this is a test");
+        let lines = msg.render(20);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("> hello world this"));
+        assert!(lines[1].starts_with("> is a test"));
     }
 
     #[test]
     fn assistant_render() {
-        let block = MessageBlock {
+        let mut msg = Message {
             role: Role::Assistant,
             text: "short".to_string(),
         };
-        assert_eq!(block.render(80), vec!["short"]);
+        let lines = msg.render(80);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("| short"));
     }
 
     #[test]
     fn empty_assistant_render() {
-        let block = MessageBlock::assistant();
-        let lines = block.render(80);
+        let mut msg = Message::assistant();
+        let lines = msg.render(80);
         assert!(lines.is_empty());
     }
 }

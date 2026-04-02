@@ -263,18 +263,6 @@ pub fn wrap_text(text: &str, max_width: usize, hyphen: &str) -> Vec<String> {
     lines
 }
 
-/// Prepend `prefix` to the first line and `indent` to the rest (hanging indent).
-pub fn prefix_lines(lines: &[String], prefix: &str, indent: &str) -> Vec<String> {
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let p = if i == 0 { prefix } else { indent };
-            format!("{p}{line}")
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,18 +418,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prefix_lines_hanging() {
-        let lines = vec!["first".into(), "second".into()];
-        assert_eq!(
-            prefix_lines(&lines, "> ", "  "),
-            vec!["> first", "  second"]
-        );
-    }
-
-    #[test]
-    fn prefix_lines_empty_prefix() {
-        let lines = vec!["only".into()];
-        assert_eq!(prefix_lines(&lines, "", ""), vec!["only"]);
-    }
 }
