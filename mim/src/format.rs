@@ -152,7 +152,10 @@ fn take_width(s: &str, max_width: usize) -> String {
 /// Word-wrap a single line of text at word boundaries.
 /// Words longer than `max_width` are kept intact (the caller can truncate).
 /// Returns `vec![""]` for empty input.
-pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
+/// Word-wrap a single line of text at word boundaries.
+/// Words longer than `max_width` are broken, with `hyphen` appended at each break.
+/// Returns `vec![""]` for empty input.
+pub fn word_wrap(text: &str, max_width: usize, hyphen: &str) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
@@ -162,18 +165,16 @@ pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     let mut line_len: usize = 0;
 
     for word in text.split_whitespace() {
-        let word_len = word.len();
         if line.is_empty() {
-            line.push_str(word);
-            line_len = word_len;
-        } else if line_len + 1 + word_len <= max_width {
+            push_word(&mut lines, &mut line, &mut line_len, word, max_width, hyphen);
+        } else if line_len + 1 + word.len() <= max_width {
             line.push(' ');
             line.push_str(word);
-            line_len += 1 + word_len;
+            line_len += 1 + word.len();
         } else {
             lines.push(std::mem::take(&mut line));
-            line.push_str(word);
-            line_len = word_len;
+            line_len = 0;
+            push_word(&mut lines, &mut line, &mut line_len, word, max_width, hyphen);
         }
     }
 
@@ -188,15 +189,72 @@ pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
+/// Push a word onto the current line, breaking it into chunks if it exceeds `max_width`.
+/// Non-final chunks get `hyphen` appended.
+fn push_word(
+    lines: &mut Vec<String>,
+    line: &mut String,
+    line_len: &mut usize,
+    word: &str,
+    max_width: usize,
+    hyphen: &str,
+) {
+    if word.len() <= max_width {
+        line.push_str(word);
+        *line_len = word.len();
+        return;
+    }
+
+    // Reserve room for the hyphen on each broken line.
+    let chunk_width = max_width.saturating_sub(hyphen.len()).max(1);
+
+    let mut remaining = word;
+    while !remaining.is_empty() {
+        if !line.is_empty() {
+            lines.push(std::mem::take(line));
+        }
+
+        let chunk_end = char_boundary_at(remaining, chunk_width);
+        let (chunk, rest) = remaining.split_at(chunk_end);
+
+        if rest.is_empty() {
+            // Last chunk — keep it in `line` so the next word can join.
+            line.push_str(chunk);
+            *line_len = chunk.len();
+        } else {
+            lines.push(format!("{chunk}{hyphen}"));
+            *line_len = 0;
+        }
+        remaining = rest;
+    }
+}
+
+/// Find the largest byte offset <= `max_bytes` that falls on a char boundary.
+fn char_boundary_at(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    let mut i = max_bytes;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    // Ensure we make progress even with a very narrow width.
+    if i == 0 {
+        let c = s.chars().next().unwrap();
+        i = c.len_utf8();
+    }
+    i
+}
+
 /// Split text on newlines, word-wrap each paragraph, and strip a trailing
 /// empty line (from a final `\n`).
-pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+pub fn wrap_text(text: &str, max_width: usize, hyphen: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for paragraph in text.split('\n') {
         if paragraph.is_empty() {
             lines.push(String::new());
         } else {
-            lines.extend(word_wrap(paragraph, max_width));
+            lines.extend(word_wrap(paragraph, max_width, hyphen));
         }
     }
     if lines.last().map_or(false, |l| l.is_empty()) {
@@ -260,44 +318,114 @@ mod tests {
 
     #[test]
     fn word_wrap_short() {
-        assert_eq!(word_wrap("hello world", 80), vec!["hello world"]);
+        assert_eq!(word_wrap("hello world", 80, ""), vec!["hello world"]);
     }
 
     #[test]
     fn word_wrap_breaks() {
         assert_eq!(
-            word_wrap("hello world foo", 11),
+            word_wrap("hello world foo", 11, ""),
             vec!["hello world", "foo"]
         );
     }
 
     #[test]
-    fn word_wrap_long_word() {
-        assert_eq!(word_wrap("abcdefghij", 5), vec!["abcdefghij"]);
+    fn word_wrap_long_word_no_hyphen() {
+        assert_eq!(
+            word_wrap("abcdefghij", 5, ""),
+            vec!["abcde", "fghij"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_long_word_uneven() {
+        assert_eq!(
+            word_wrap("abcdefgh", 3, ""),
+            vec!["abc", "def", "gh"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_long_then_short() {
+        assert_eq!(
+            word_wrap("abcdefgh x", 5, ""),
+            vec!["abcde", "fgh x"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_short_then_long() {
+        assert_eq!(
+            word_wrap("hi abcdefgh", 5, ""),
+            vec!["hi", "abcde", "fgh"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_long_word_unicode() {
+        // Each 'あ' is 3 bytes; width=2 means chunk_width=2,
+        // char_boundary_at rounds up to include one full char.
+        assert_eq!(
+            word_wrap("ああああ", 2, ""),
+            vec!["あ", "あ", "あ", "あ"]
+        );
     }
 
     #[test]
     fn word_wrap_empty() {
-        assert_eq!(word_wrap("", 10), vec![""]);
+        assert_eq!(word_wrap("", 10, ""), vec![""]);
+    }
+
+    #[test]
+    fn word_wrap_hyphen() {
+        assert_eq!(
+            word_wrap("abcdefghij", 6, "-"),
+            vec!["abcde-", "fghij"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_hyphen_multiple_breaks() {
+        assert_eq!(
+            word_wrap("abcdefghij", 4, "-"),
+            vec!["abc-", "def-", "ghi-", "j"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_hyphen_fits_exactly() {
+        // Word fits in max_width — no hyphen needed.
+        assert_eq!(
+            word_wrap("abcde", 5, "-"),
+            vec!["abcde"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_hyphen_mixed() {
+        assert_eq!(
+            word_wrap("hi abcdefgh ok", 5, "-"),
+            vec!["hi", "abcd-", "efgh", "ok"]
+        );
     }
 
     #[test]
     fn wrap_text_paragraphs() {
         assert_eq!(
-            wrap_text("aaa bbb\nccc ddd", 7),
+            wrap_text("aaa bbb\nccc ddd", 7, ""),
             vec!["aaa bbb", "ccc ddd"]
         );
     }
 
     #[test]
     fn wrap_text_trailing_newline() {
-        assert_eq!(wrap_text("hello\n", 80), vec!["hello"]);
+        assert_eq!(wrap_text("hello\n", 80, ""), vec!["hello"]);
     }
 
     #[test]
     fn wrap_text_blank_line() {
         assert_eq!(
-            wrap_text("a\n\nb", 80),
+            wrap_text("a\n\nb", 80, ""),
             vec!["a", "", "b"]
         );
     }

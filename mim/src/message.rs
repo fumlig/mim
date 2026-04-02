@@ -75,7 +75,7 @@ impl Widget for MessageBlock {
             Role::Assistant => ("", ""),
         };
         let wrap_w = w.saturating_sub(prefix.len()).max(1);
-        let lines = wrap_text(&self.text, wrap_w);
+        let lines = wrap_text(&self.text, wrap_w, "-");
         prefix_lines(&lines, prefix, indent)
     }
 }
