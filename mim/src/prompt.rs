@@ -3,7 +3,7 @@ use std::cell::Cell;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::widget::Widget;
-use crate::width::visible_width;
+use crate::format::visible_width;
 
 /// Action returned by [`Prompt::handle`].
 pub enum PromptAction {
@@ -44,6 +44,18 @@ impl Prompt {
     /// The current input text.
     pub fn text(&self) -> String {
         self.buf.iter().collect()
+    }
+
+    /// Whether the input buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    /// Clear the input buffer and reset cursor.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.cursor = 0;
+        self.scroll.set(0);
     }
 
     /// Process a crossterm event. Returns an action if one was triggered.

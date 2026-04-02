@@ -10,7 +10,7 @@ use crossterm::{
 use futures::StreamExt;
 
 use crate::widget::Widget;
-use crate::width::truncate_to_width;
+use crate::format::truncate_to_width;
 
 /// Per-render frame. Accumulates lines from widgets and raw text.
 /// Created by [`Renderer::begin`], consumed by [`Renderer::end`].

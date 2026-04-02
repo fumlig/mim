@@ -1,6 +1,9 @@
 use crate::entry;
 use crate::tool::Tool;
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::{Provider, ResponseEvent, ResponseResult};
 use async_openai::{
     config::OpenAIConfig,
@@ -158,12 +161,13 @@ impl OpenAIProvider {
 impl Provider for OpenAIProvider {
     type Error = OpenAIError;
 
-    async fn create_response(
-        &self,
-        history: &[entry::Entry],
-        model: &str,
-        tools: impl IntoIterator<Item = &Tool> + Send,
-    ) -> ResponseResult<Self::Error> {
+    fn create_response<'a>(
+        &'a self,
+        history: &'a [entry::Entry],
+        model: &'a str,
+        tools: impl IntoIterator<Item = &'a Tool> + Send + 'a,
+    ) -> Pin<Box<dyn Future<Output = ResponseResult<Self::Error>> + Send + 'a>> {
+        Box::pin(async move {
         let input = {
             let items = history.iter().map(InputItem::from).collect();
             InputParam::Items(items)
@@ -261,6 +265,8 @@ impl Provider for OpenAIProvider {
             }
         });
 
-        Ok(Box::pin(mapped))
+        let stream: super::ResponseStream<Self::Error> = Box::pin(mapped);
+        Ok(stream)
+        })
     }
 }

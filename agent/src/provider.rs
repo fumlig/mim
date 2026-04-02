@@ -21,11 +21,11 @@ pub trait Provider {
     type Error;
 
     fn create_response<'a>(
-        &self,
-        history: &[Entry],
-        model: &str,
-        tools: impl IntoIterator<Item = &'a Tool> + Send,
-    ) -> impl Future<Output = ResponseResult<Self::Error>> + Send;
+        &'a self,
+        history: &'a [Entry],
+        model: &'a str,
+        tools: impl IntoIterator<Item = &'a Tool> + Send + 'a,
+    ) -> Pin<Box<dyn Future<Output = ResponseResult<Self::Error>> + Send + 'a>>;
 }
 
 #[cfg(feature = "openai")]

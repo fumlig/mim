@@ -149,6 +149,74 @@ fn take_width(s: &str, max_width: usize) -> String {
     result
 }
 
+/// Word-wrap a single line of text at word boundaries.
+/// Words longer than `max_width` are kept intact (the caller can truncate).
+/// Returns `vec![""]` for empty input.
+pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_len: usize = 0;
+
+    for word in text.split_whitespace() {
+        let word_len = word.len();
+        if line.is_empty() {
+            line.push_str(word);
+            line_len = word_len;
+        } else if line_len + 1 + word_len <= max_width {
+            line.push(' ');
+            line.push_str(word);
+            line_len += 1 + word_len;
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line.push_str(word);
+            line_len = word_len;
+        }
+    }
+
+    if !line.is_empty() {
+        lines.push(line);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
+/// Split text on newlines, word-wrap each paragraph, and strip a trailing
+/// empty line (from a final `\n`).
+pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.extend(word_wrap(paragraph, max_width));
+        }
+    }
+    if lines.last().map_or(false, |l| l.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Prepend `prefix` to the first line and `indent` to the rest (hanging indent).
+pub fn prefix_lines(lines: &[String], prefix: &str, indent: &str) -> Vec<String> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let p = if i == 0 { prefix } else { indent };
+            format!("{p}{line}")
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +256,64 @@ mod tests {
         let t = truncate_to_width(s, 8, "...");
         assert_eq!(t, "\x1b[31mhello...");
         assert_eq!(visible_width(&t), 8);
+    }
+
+    #[test]
+    fn word_wrap_short() {
+        assert_eq!(word_wrap("hello world", 80), vec!["hello world"]);
+    }
+
+    #[test]
+    fn word_wrap_breaks() {
+        assert_eq!(
+            word_wrap("hello world foo", 11),
+            vec!["hello world", "foo"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_long_word() {
+        assert_eq!(word_wrap("abcdefghij", 5), vec!["abcdefghij"]);
+    }
+
+    #[test]
+    fn word_wrap_empty() {
+        assert_eq!(word_wrap("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_text_paragraphs() {
+        assert_eq!(
+            wrap_text("aaa bbb\nccc ddd", 7),
+            vec!["aaa bbb", "ccc ddd"]
+        );
+    }
+
+    #[test]
+    fn wrap_text_trailing_newline() {
+        assert_eq!(wrap_text("hello\n", 80), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_text_blank_line() {
+        assert_eq!(
+            wrap_text("a\n\nb", 80),
+            vec!["a", "", "b"]
+        );
+    }
+
+    #[test]
+    fn prefix_lines_hanging() {
+        let lines = vec!["first".into(), "second".into()];
+        assert_eq!(
+            prefix_lines(&lines, "> ", "  "),
+            vec!["> first", "  second"]
+        );
+    }
+
+    #[test]
+    fn prefix_lines_empty_prefix() {
+        let lines = vec!["only".into()];
+        assert_eq!(prefix_lines(&lines, "", ""), vec!["only"]);
     }
 }

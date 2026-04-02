@@ -1,10 +1,11 @@
 mod context;
+mod format;
+mod message;
 mod prompt;
 mod screen;
 mod spinner;
 mod tool;
 mod widget;
-mod width;
 
 use anyhow::Result;
 use clap::Parser;
@@ -16,14 +17,14 @@ use tracing_subscriber::EnvFilter;
 use agent::{
     provider::{openai::OpenAIProvider, Provider, ResponseEvent},
     session::Session,
-    Agent,
+    Agent, Cancel,
 };
+use tokio::sync::mpsc;
 
+use crate::message::MessageBlock;
+use crate::prompt::{Prompt, PromptAction};
 use crate::screen::Screen;
-use crate::{
-    prompt::{Prompt, PromptAction},
-    spinner::Spinner,
-};
+use crate::spinner::{Spinner, SpinnerVariant};
 
 #[derive(Parser, Debug)]
 #[command(name = "mim", version)]
@@ -46,92 +47,140 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-
     run(args).await
+}
+
+enum AgentOutput {
+    /// The agent is about to process this input.
+    Starting { text: String, cancel: Cancel },
+    /// A streaming event from the agent.
+    Event(ResponseEvent),
+    /// The current turn completed.
+    TurnDone,
+    /// An error occurred during the turn.
+    Error(String),
+}
+
+async fn agent_task<P>(
+    mut agent: Agent<P>,
+    mut input_rx: mpsc::Receiver<String>,
+    output_tx: mpsc::UnboundedSender<AgentOutput>,
+) where
+    P: Provider + Send + 'static,
+    P::Error: std::fmt::Display + Send + Sync + 'static,
+{
+    while let Some(text) = input_rx.recv().await {
+        let cancel = Cancel::new();
+        if output_tx
+            .send(AgentOutput::Starting {
+                text: text.clone(),
+                cancel: cancel.clone(),
+            })
+            .is_err()
+        {
+            break;
+        }
+
+        let tx = output_tx.clone();
+        let result = agent
+            .run(&text, cancel, move |event| {
+                let _ = tx.send(AgentOutput::Event(event));
+            })
+            .await;
+
+        let msg = match result {
+            Ok(()) => AgentOutput::TurnDone,
+            Err(e) => AgentOutput::Error(e.to_string()),
+        };
+        if output_tx.send(msg).is_err() {
+            break;
+        }
+    }
 }
 
 async fn run(args: Args) -> Result<()> {
     let ctx = Context::new(args.path)?;
-
     debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
 
     let provider = OpenAIProvider::new();
     let tools = tool::make_tools()?;
     let session = Session::open(ctx.session_path)?;
+    let agent = Agent::new(provider, args.model, tools, session);
 
-    let mut agent = Agent::new(provider, args.model, tools, session);
+    let (input_tx, input_rx) = mpsc::channel::<String>(16);
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<AgentOutput>();
+
+    tokio::spawn(agent_task(agent, input_rx, output_tx));
 
     let mut screen = Screen::new()?;
     let mut prompt = Prompt::new("> ");
-    let mut spinner = Spinner::new(spinner::SpinnerVariant::Line);
-
-    let mut lines: Vec<String> = Vec::new();
+    let mut blocks: Vec<MessageBlock> = Vec::new();
+    let mut current_cancel: Option<Cancel> = None;
+    let mut spinner = Spinner::new(SpinnerVariant::Line);
 
     loop {
         let mut frame = screen.begin()?;
-
-        lines.iter().for_each(|l| frame.add_line(l.clone()));
-
-        frame.add(&spinner);
+        for (i, block) in blocks.iter().enumerate() {
+            if i > 0 {
+                frame.add_line(String::new());
+            }
+            frame.add(block);
+        }
+        if current_cancel.is_some() {
+            frame.add(&spinner);
+        }
         frame.add_focused(&prompt);
         screen.end(frame)?;
 
-        let event = screen.event().await?;
-
-        spinner.step();
-
-        let Some(action) = prompt.handle(event) else {
-            continue;
-        };
-
-        match action {
-            PromptAction::Submit(text) => lines.push(text),
-            PromptAction::Suspend => screen.suspend()?,
-            PromptAction::Quit => screen.quit()?,
-            PromptAction::Interrupt | PromptAction::Eof => break,
+        tokio::select! {
+            event = screen.event() => {
+                let Some(action) = prompt.handle(event?) else {
+                    continue;
+                };
+                match action {
+                    PromptAction::Submit(text) => {
+                        let _ = input_tx.send(text).await;
+                    }
+                    PromptAction::Interrupt => {
+                        if let Some(cancel) = current_cancel.take() {
+                            cancel.cancel();
+                        } else if prompt.is_empty() {
+                            break;
+                        } else {
+                            prompt.clear();
+                        }
+                    }
+                    PromptAction::Suspend => screen.suspend()?,
+                    PromptAction::Quit => screen.quit()?,
+                    PromptAction::Eof => break,
+                }
+            }
+            Some(output) = output_rx.recv() => {
+                match output {
+                    AgentOutput::Starting { text, cancel } => {
+                        blocks.push(MessageBlock::user(&text));
+                        blocks.push(MessageBlock::assistant());
+                        current_cancel = Some(cancel);
+                    }
+                    AgentOutput::Event(event) => {
+                        spinner.step();
+                        if let Some(block) = blocks.last_mut() {
+                            block.push_event(&event);
+                        }
+                    }
+                    AgentOutput::TurnDone => {
+                        current_cancel = None;
+                    }
+                    AgentOutput::Error(e) => {
+                        current_cancel = None;
+                        if let Some(block) = blocks.last_mut() {
+                            block.push_error(&e);
+                        }
+                    }
+                }
+            }
         }
     }
 
     Ok(())
-}
-
-async fn interact<P: Provider>(mut agent: Agent<P>) -> Result<()>
-where
-    P::Error: std::fmt::Display + Send + Sync + 'static,
-{
-    loop {
-        let input = "hello";
-
-        agent
-            .run(input, |event| match event {
-                ResponseEvent::TextDelta(text) => {
-                    print!("{}", text);
-                }
-                ResponseEvent::TextDone(_) => {
-                    eprintln!("[text done]")
-                }
-                ResponseEvent::ReasoningDelta(text) => {
-                    eprintln!("[reasoning delta: {}]", text)
-                }
-                ResponseEvent::ReasoningDone(_) => {
-                    eprintln!("[reasoning done]")
-                }
-                ResponseEvent::ToolCall(tool_call) => {
-                    eprintln!(
-                        "[tool call: {} args={}]",
-                        tool_call.name, tool_call.arguments
-                    );
-                }
-                ResponseEvent::ToolResult(tool_result) => {
-                    eprintln!(
-                        "[tool result for {}: {}]",
-                        tool_result.call_id, tool_result.output
-                    );
-                }
-                _ => {}
-            })
-            .await?;
-
-        println!();
-    }
 }
