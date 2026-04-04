@@ -1,11 +1,17 @@
 mod border;
+#[cfg(feature = "capture")]
+mod capture;
 mod context;
 mod editor;
 mod format;
 mod message;
 mod screen;
+#[cfg(feature = "capture")]
+mod silero;
 mod spinner;
 mod tool;
+#[cfg(feature = "capture")]
+mod voice;
 mod widget;
 
 use anyhow::Result;
@@ -22,7 +28,6 @@ use agent::{
 };
 use tokio::sync::mpsc;
 
-use crate::border::Border;
 use crate::editor::{Editor, EditorAction};
 use crate::message::Message;
 use crate::screen::Screen;
@@ -39,6 +44,10 @@ struct Args {
     /// Root .mim directory. Defaults to nearest .mim in an ancestor, or ./.mim
     #[arg(short, long, env = "MIM_PATH")]
     path: Option<PathBuf>,
+
+    #[cfg(feature = "capture")]
+    #[command(flatten)]
+    audio: capture::AudioArgs,
 }
 
 #[tokio::main]
@@ -102,6 +111,36 @@ async fn agent_task<P>(
 }
 
 async fn run(args: Args) -> Result<()> {
+    #[cfg(feature = "capture")]
+    {
+        use crate::capture::{self, AudioCapture};
+        use crate::voice::{VoiceDetector, VoiceEvent};
+
+        let host = capture::resolve_host(args.audio.audio_host.as_deref())?;
+        let device = capture::resolve_device(&host, args.audio.audio_device.as_deref())?;
+        use futures::StreamExt;
+
+        let (audio, _guard) = AudioCapture::new(device)?.stream()?;
+        let mut events = VoiceDetector::new(
+            args.audio.vad_threshold,
+            args.audio.vad_silence,
+            &args.audio.vad_model,
+        )?
+        .detect(audio);
+
+        while let Some(event) = events.next().await {
+            match event {
+                VoiceEvent::SpeechStart => println!("[speech start]"),
+                VoiceEvent::SpeechEnd(samples) => {
+                    let ms = samples.len() as u64 * 1000 / 16_000;
+                    println!("[speech end] {ms} ms, {} samples", samples.len());
+                }
+            }
+        }
+
+        println!("ending listen");
+    }
+
     let ctx = Context::new(args.path)?;
     debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
 
