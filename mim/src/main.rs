@@ -14,10 +14,11 @@ mod tool;
 mod voice;
 mod widget;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use context::Context;
-use std::path::PathBuf;
+use futures::StreamExt;
+use std::{io::ErrorKind, path::PathBuf};
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
@@ -110,6 +111,17 @@ async fn agent_task<P>(
     }
 }
 
+pub enum Mode {
+    Text,
+    Audio,
+}
+
+struct State<P: Provider> {
+    mode: Mode,
+    screen: Screen,
+    agent: Agent<P>,
+}
+
 async fn run(args: Args) -> Result<()> {
     /*
     #[cfg(feature = "capture")]
@@ -162,6 +174,7 @@ async fn run(args: Args) -> Result<()> {
     let mut current_cancel: Option<Cancel> = None;
     let mut spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
 
+    let mut events = screen.take_events().ok_or(anyhow!("no event stream"))?;
     loop {
         let mut frame = screen.begin()?;
         for (i, block) in blocks.iter_mut().enumerate() {
@@ -170,25 +183,27 @@ async fn run(args: Args) -> Result<()> {
             }
             frame.add(block);
         }
+
         if current_cancel.is_some() {
             frame.add(&mut spinner);
         }
-        {
-            // The editor is always focused; it embeds CURSOR_MARKER in its
-            // own rendered output, and Screen::end extracts it.
-            frame.add(
-                &mut prompt
-                    .pad(0, 0, 0, 1)
-                    .line_numbers(2)
-                    .ascii()
-                    .pad(1, 0, 0, 0),
-            );
-        }
+
+        // The editor is always focused; it embeds CURSOR_MARKER in its
+        // own rendered output, and Screen::end extracts it.
+        frame.add(
+            &mut prompt
+                .pad(0, 0, 0, 1)
+                .line_numbers(2)
+                .ascii()
+                .pad(1, 0, 0, 0),
+        );
+
         screen.end(frame)?;
 
         tokio::select! {
-            event = screen.event() => {
-                let Some(action) = prompt.handle(event?) else {
+            Some(result) = events.next() => {
+                let event = result?;
+                let Some(action) = prompt.handle(event) else {
                     continue;
                 };
                 match action {

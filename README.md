@@ -14,3 +14,7 @@ my personal agent harness
 
 - written with the help of coding agents
 - inspired by [pi](https://github.com/badlogic/pi-mono)
+
+input events ->
+  mode change
+  prompt insert

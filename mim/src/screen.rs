@@ -69,7 +69,7 @@ pub struct Screen {
     /// Whether raw mode is active.
     active: bool,
     /// Async stream of crossterm events.
-    events: EventStream,
+    events: Option<EventStream>,
 }
 
 impl Screen {
@@ -86,7 +86,7 @@ impl Screen {
             last_frame: None,
             cursor_row: 0,
             active: true,
-            events: EventStream::new(),
+            events: Some(EventStream::new()),
         })
     }
 
@@ -147,14 +147,8 @@ impl Screen {
         Ok(())
     }
 
-    /// Wait for the next crossterm event asynchronously.
-    pub async fn event(&mut self) -> io::Result<Event> {
-        self.events.next().await.unwrap_or_else(|| {
-            Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "event stream closed",
-            ))
-        })
+    pub fn take_events(&mut self) -> Option<EventStream> {
+        self.events.take()
     }
 
     /// Begin a new render pass.
