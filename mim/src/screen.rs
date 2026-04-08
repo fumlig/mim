@@ -18,9 +18,9 @@ pub struct Frame {
     /// Rendered lines.
     lines: Vec<String>,
     /// Terminal width at frame creation.
-    width: u16,
+    width: usize,
     /// Terminal height at frame creation.
-    height: u16,
+    height: usize,
     /// Hardware cursor position requested by the focused widget (absolute row, col).
     cursor: Option<(usize, usize)>,
     /// When set, all reachable lines are rewritten regardless of diff.
@@ -29,12 +29,12 @@ pub struct Frame {
 
 impl Frame {
     /// Terminal width for this frame.
-    pub fn width(&self) -> u16 {
+    pub fn width(&self) -> usize {
         self.width
     }
 
     /// Terminal height for this frame.
-    pub fn height(&self) -> u16 {
+    pub fn height(&self) -> usize {
         self.height
     }
 
@@ -106,7 +106,13 @@ impl Screen {
         self.active = false;
 
         let mut stdout = io::stdout();
-        if self.last_frame.is_some() {
+        if let Some(last) = self.last_frame.as_ref() {
+            // Move the hardware cursor down to the last rendered line so the
+            // shell prompt doesn't overwrite content below the focused
+            // widget's cursor position.
+            let last_row = last.lines.len().saturating_sub(1);
+            let target = last_row.max(self.cursor_row);
+            self.move_cursor(&mut stdout, target, 0)?;
             write!(stdout, "\r\n")?;
         }
         crossterm::execute!(stdout, Show)?;
@@ -165,8 +171,8 @@ impl Screen {
 
         Ok(Frame {
             lines: Vec::new(),
-            width,
-            height,
+            width: width as usize,
+            height: height as usize,
             cursor: None,
             reset: false,
         })
@@ -190,7 +196,12 @@ impl Screen {
             self.full_render(&mut stdout, &next, false)
         }?;
 
-        self.update_cursor(&mut stdout, &next)?;
+        if let Some((row, col)) = next.cursor {
+            self.move_cursor(&mut stdout, row, col)?;
+            queue!(&mut stdout, Show)?;
+        } else {
+            queue!(&mut stdout, Hide)?;
+        }
 
         queue!(stdout, EndSynchronizedUpdate)?;
 
@@ -204,9 +215,9 @@ impl Screen {
         if clear {
             queue!(
                 out,
-                Clear(ClearType::All),           // ESC[2J — clear visible screen
+                Clear(ClearType::All), // ESC[2J — clear visible screen
                 crossterm::cursor::MoveTo(0, 0), // ESC[H  — cursor home
-                Clear(ClearType::Purge),         // ESC[3J — clear scrollback
+                Clear(ClearType::Purge), // ESC[3J — clear scrollback
             )?;
         }
         Self::write_lines(out, &next.lines, next.width)?;
@@ -237,15 +248,10 @@ impl Screen {
             return self.full_render(out, next, true);
         }
 
-        // Move cursor to the first changed line.
-        if first < self.cursor_row {
-            queue!(out, MoveUp((self.cursor_row - first) as u16))?;
-        } else if first > self.cursor_row {
-            queue!(out, MoveDown((first - self.cursor_row) as u16))?;
-        }
-
-        // Clear from cursor to end of screen, then render all lines from here.
-        queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
+        // Move cursor to the first changed line, clear to end of screen,
+        // then render all lines from here.
+        self.move_cursor(out, first, 0)?;
+        queue!(out, Clear(ClearType::FromCursorDown))?;
         Self::write_lines(out, &next.lines[first..], next.width)?;
 
         self.cursor_row = next.lines.len().saturating_sub(1);
@@ -253,8 +259,8 @@ impl Screen {
     }
 
     /// Write lines, truncating to `width` and appending a style reset after each.
-    fn write_lines(out: &mut impl Write, lines: &[String], width: u16) -> io::Result<()> {
-        let w = width as usize;
+    fn write_lines(out: &mut impl Write, lines: &[String], width: usize) -> io::Result<()> {
+        let w = width;
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
                 write!(out, "\r\n")?;
@@ -266,21 +272,20 @@ impl Screen {
         Ok(())
     }
 
-    /// Position the hardware cursor at the frame's requested position,
-    /// or hide it if no widget requested focus.
-    fn update_cursor(&mut self, out: &mut impl Write, next: &Frame) -> io::Result<()> {
-        if let Some((row, col)) = next.cursor {
-            let delta = row as isize - self.cursor_row as isize;
-            if delta > 0 {
-                queue!(out, MoveDown(delta as u16))?;
-            } else if delta < 0 {
-                queue!(out, MoveUp((-delta) as u16))?;
-            }
-            queue!(out, MoveToColumn(col as u16), Show)?;
-            self.cursor_row = row;
-        } else {
-            queue!(out, Hide)?;
+    /// Move the hardware cursor
+    fn move_cursor(&mut self, out: &mut impl Write, row: usize, col: usize) -> io::Result<()> {
+        let delta = row as isize - self.cursor_row as isize;
+        let abs = u16::try_from(delta.unsigned_abs())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if delta > 0 {
+            queue!(out, MoveDown(abs))?;
+        } else if delta < 0 {
+            queue!(out, MoveUp(abs))?;
         }
+
+        queue!(out, MoveToColumn(col as u16))?;
+
+        self.cursor_row = row;
         Ok(())
     }
 }

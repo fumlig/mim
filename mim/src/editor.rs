@@ -268,6 +268,20 @@ impl Editor {
             display_lines.push(String::new());
         }
 
+        // When the cursor sits at column `w` it is one past the last visible
+        // column of a fully-filled segment. If we left it there the reverse-
+        // video cursor block (and the hardware cursor) would land on top of
+        // whatever sits to the right of the editor — e.g. the block border
+        // in the main UI. Wrap it to column 0 of the next visual row instead,
+        // adding an empty display line when there isn't one already.
+        if cursor_col >= w {
+            cursor_row += 1;
+            cursor_col = 0;
+            if cursor_row >= display_lines.len() {
+                display_lines.push(String::new());
+            }
+        }
+
         (display_lines, cursor_row, cursor_col)
     }
 }
@@ -316,7 +330,7 @@ fn line_breaks(chars: &[char], max_width: usize) -> Vec<usize> {
 }
 
 impl Widget for Editor {
-    fn render(&mut self, width: u16) -> Vec<String> {
+    fn render(&mut self, width: usize) -> Vec<String> {
         let width = width as usize;
         if width == 0 {
             return vec![String::new()];
@@ -340,7 +354,7 @@ impl Widget for Editor {
         lines
     }
 
-    fn cursor(&mut self, width: u16) -> Option<(usize, usize)> {
+    fn cursor(&mut self, width: usize) -> Option<(usize, usize)> {
         let width = width as usize;
         if width == 0 {
             return Some((0, 0));
@@ -512,9 +526,45 @@ mod tests {
     }
 
     #[test]
+    fn cursor_wraps_at_exact_width() {
+        // Typing exactly `width` characters should push the cursor onto a
+        // new visual line instead of sitting at column `width` where the
+        // right border of an enclosing block lives.
+        let mut p = editor();
+        type_str(&mut p, "abcde");
+        let (lines, row, col) = p.layout(5);
+        assert_eq!(lines, vec!["abcde".to_string(), String::new()]);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn cursor_wraps_at_exact_width_after_newline() {
+        let mut p = editor();
+        type_str(&mut p, "ab\ncdefg");
+        let (lines, row, col) = p.layout(5);
+        assert_eq!(
+            lines,
+            vec!["ab".to_string(), "cdefg".to_string(), String::new()]
+        );
+        assert_eq!((row, col), (2, 0));
+    }
+
+    #[test]
+    fn cursor_just_below_width_does_not_wrap() {
+        let mut p = editor();
+        type_str(&mut p, "abcd");
+        let (lines, row, col) = p.layout(5);
+        assert_eq!(lines, vec!["abcd".to_string()]);
+        assert_eq!((row, col), (0, 4));
+    }
+
+    #[test]
     fn hard_break_long_word() {
         let mut p = editor();
         type_str(&mut p, "abcdefghij");
+        // Put the cursor at the start so the "wrap cursor at full width"
+        // behaviour doesn't add a trailing empty visual line.
+        p.cursor = 0;
         let (lines, _, _) = p.layout(5);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "abcde");

@@ -1,18 +1,32 @@
 use crate::widget::Widget;
 
-/// A simple character spinner that cycles through animation frames.
+/// A simple character spinner driven by an iterator of frames.
 pub struct Spinner {
-    frames: Box<dyn Iterator<Item = &'static str>>,
-    current: &'static str,
+    frames: Box<dyn Iterator<Item = String>>,
+    current: String,
 }
 
 impl Spinner {
     pub const ASCII: &[&str] = &["|", "/", "-", "\\"];
 
-    /// Creates a new spinner with the given style.
-    pub fn new(frames: &'static [&'static str]) -> Self {
-        let mut iter = frames.iter().copied().cycle();
-        let current = iter.next().unwrap();
+    /// Create a spinner that cycles forever through a fixed set of frames.
+    pub fn cycle<I>(frames: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<String> + 'static,
+        I::IntoIter: Clone + 'static,
+    {
+        Self::from_iter(frames.into_iter().map(Into::into).cycle())
+    }
+
+    /// Create a spinner from any iterator of frames. Wrap in `.cycle()`
+    /// yourself if you want looping. Stays on the last frame when exhausted.
+    pub fn from_iter<I>(frames: I) -> Self
+    where
+        I: IntoIterator<Item = String> + 'static,
+    {
+        let mut iter = frames.into_iter();
+        let current = iter.next().unwrap_or_default();
         Self {
             frames: Box::new(iter),
             current,
@@ -21,19 +35,22 @@ impl Spinner {
 
     /// Returns the current frame without advancing.
     pub fn get(&self) -> &str {
-        self.current
+        &self.current
     }
 
     /// Advances the spinner by one step and returns the new frame.
+    /// Stays on the last frame if the iterator is exhausted.
     pub fn step(&mut self) -> &str {
-        self.current = self.frames.next().unwrap();
-        self.current
+        if let Some(next) = self.frames.next() {
+            self.current = next;
+        }
+        &self.current
     }
 }
 
 impl Widget for Spinner {
-    fn render(&mut self, _: u16) -> Vec<String> {
-        vec![self.current.to_string()]
+    fn render(&mut self, _: usize) -> Vec<String> {
+        vec![self.current.clone()]
     }
 }
 
@@ -43,11 +60,28 @@ mod tests {
 
     #[test]
     fn cycles_through_frames() {
-        let mut s = Spinner::new(Spinner::ASCII);
+        let mut s = Spinner::cycle(Spinner::ASCII.iter().copied());
         assert_eq!(s.get(), "|");
         assert_eq!(s.step(), "/");
         assert_eq!(s.step(), "-");
         assert_eq!(s.step(), "\\");
         assert_eq!(s.step(), "|");
+    }
+
+    #[test]
+    fn finite_iterator_sticks_on_last_frame() {
+        let mut s = Spinner::from_iter(["a".to_string(), "b".to_string()].into_iter());
+        assert_eq!(s.get(), "a");
+        assert_eq!(s.step(), "b");
+        assert_eq!(s.step(), "b");
+        assert_eq!(s.step(), "b");
+    }
+
+    #[test]
+    fn procedural_frames() {
+        let mut s = Spinner::from_iter((1..).map(|n| format!("{n}")));
+        assert_eq!(s.get(), "1");
+        assert_eq!(s.step(), "2");
+        assert_eq!(s.step(), "3");
     }
 }

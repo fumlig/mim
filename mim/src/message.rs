@@ -1,8 +1,8 @@
 use agent::provider::ResponseEvent;
 
-use crate::border::Border;
+use crate::block::{Block, VerticalBorder};
 use crate::format::wrap_text;
-use crate::widget::Widget;
+use crate::widget::{Widget, WidgetExt};
 
 pub enum Role {
     User,
@@ -73,7 +73,7 @@ struct WrappedText<'a> {
 }
 
 impl Widget for WrappedText<'_> {
-    fn render(&mut self, width: u16) -> Vec<String> {
+    fn render(&mut self, width: usize) -> Vec<String> {
         let w = width as usize;
         if w == 0 {
             return vec![];
@@ -83,14 +83,14 @@ impl Widget for WrappedText<'_> {
 }
 
 impl Widget for Message {
-    fn render(&mut self, width: u16) -> Vec<String> {
+    fn render(&mut self, width: usize) -> Vec<String> {
         if self.text.is_empty() {
             return vec![];
         }
 
         let prefix = self.prefix();
         let mut content = WrappedText { text: &self.text };
-        let mut border = Border::new(&mut content).left(prefix, prefix.len());
+        let mut border = Block::new(&mut content).left(VerticalBorder::repeat(prefix.to_string()));
         border.render(width)
     }
 }

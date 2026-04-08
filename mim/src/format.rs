@@ -126,6 +126,40 @@ pub fn truncate_to_width(s: &str, max_width: usize, ellipsis: &str) -> String {
     result
 }
 
+pub fn pad_to_width(s: &str, width: usize, space: &str) -> String {
+    let mut result = s.to_string();
+    let w = visible_width(s);
+    if w <= width {
+        result.push_str(&repeat_to_width(space, width - w));
+    }
+
+    result
+}
+
+pub fn repeat_to_width(s: &str, max_width: usize) -> String {
+    let w = visible_width(s);
+    let n = if w > 0 { max_width / w } else { 0 };
+    s.repeat(n)
+}
+
+pub fn concatenate_to_width<I, S>(seq: I, max_width: usize) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut result = String::new();
+    let mut width = 0;
+    for s in seq {
+        let w = visible_width(s.as_ref());
+        if width + w < max_width {
+            result.push_str(s.as_ref());
+            width += w;
+        }
+    }
+
+    result
+}
+
 /// Take characters from `s` up to `max_width` visible columns.
 /// Includes ANSI escape sequences in the output (they contribute zero width).
 fn take_width(s: &str, max_width: usize) -> String {
@@ -166,7 +200,14 @@ pub fn word_wrap(text: &str, max_width: usize, hyphen: &str) -> Vec<String> {
 
     for word in text.split_whitespace() {
         if line.is_empty() {
-            push_word(&mut lines, &mut line, &mut line_len, word, max_width, hyphen);
+            push_word(
+                &mut lines,
+                &mut line,
+                &mut line_len,
+                word,
+                max_width,
+                hyphen,
+            );
         } else if line_len + 1 + word.len() <= max_width {
             line.push(' ');
             line.push_str(word);
@@ -174,7 +215,14 @@ pub fn word_wrap(text: &str, max_width: usize, hyphen: &str) -> Vec<String> {
         } else {
             lines.push(std::mem::take(&mut line));
             line_len = 0;
-            push_word(&mut lines, &mut line, &mut line_len, word, max_width, hyphen);
+            push_word(
+                &mut lines,
+                &mut line,
+                &mut line_len,
+                word,
+                max_width,
+                hyphen,
+            );
         }
     }
 
@@ -319,44 +367,29 @@ mod tests {
 
     #[test]
     fn word_wrap_long_word_no_hyphen() {
-        assert_eq!(
-            word_wrap("abcdefghij", 5, ""),
-            vec!["abcde", "fghij"]
-        );
+        assert_eq!(word_wrap("abcdefghij", 5, ""), vec!["abcde", "fghij"]);
     }
 
     #[test]
     fn word_wrap_long_word_uneven() {
-        assert_eq!(
-            word_wrap("abcdefgh", 3, ""),
-            vec!["abc", "def", "gh"]
-        );
+        assert_eq!(word_wrap("abcdefgh", 3, ""), vec!["abc", "def", "gh"]);
     }
 
     #[test]
     fn word_wrap_long_then_short() {
-        assert_eq!(
-            word_wrap("abcdefgh x", 5, ""),
-            vec!["abcde", "fgh x"]
-        );
+        assert_eq!(word_wrap("abcdefgh x", 5, ""), vec!["abcde", "fgh x"]);
     }
 
     #[test]
     fn word_wrap_short_then_long() {
-        assert_eq!(
-            word_wrap("hi abcdefgh", 5, ""),
-            vec!["hi", "abcde", "fgh"]
-        );
+        assert_eq!(word_wrap("hi abcdefgh", 5, ""), vec!["hi", "abcde", "fgh"]);
     }
 
     #[test]
     fn word_wrap_long_word_unicode() {
         // Each 'あ' is 3 bytes; width=2 means chunk_width=2,
         // char_boundary_at rounds up to include one full char.
-        assert_eq!(
-            word_wrap("ああああ", 2, ""),
-            vec!["あ", "あ", "あ", "あ"]
-        );
+        assert_eq!(word_wrap("ああああ", 2, ""), vec!["あ", "あ", "あ", "あ"]);
     }
 
     #[test]
@@ -366,10 +399,7 @@ mod tests {
 
     #[test]
     fn word_wrap_hyphen() {
-        assert_eq!(
-            word_wrap("abcdefghij", 6, "-"),
-            vec!["abcde-", "fghij"]
-        );
+        assert_eq!(word_wrap("abcdefghij", 6, "-"), vec!["abcde-", "fghij"]);
     }
 
     #[test]
@@ -383,10 +413,7 @@ mod tests {
     #[test]
     fn word_wrap_hyphen_fits_exactly() {
         // Word fits in max_width — no hyphen needed.
-        assert_eq!(
-            word_wrap("abcde", 5, "-"),
-            vec!["abcde"]
-        );
+        assert_eq!(word_wrap("abcde", 5, "-"), vec!["abcde"]);
     }
 
     #[test]
@@ -412,10 +439,6 @@ mod tests {
 
     #[test]
     fn wrap_text_blank_line() {
-        assert_eq!(
-            wrap_text("a\n\nb", 80, ""),
-            vec!["a", "", "b"]
-        );
+        assert_eq!(wrap_text("a\n\nb", 80, ""), vec!["a", "", "b"]);
     }
-
 }

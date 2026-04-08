@@ -1,4 +1,4 @@
-use crate::border::Border;
+use crate::block::{Block, HorizontalBorder, VerticalBorder};
 
 /// A self-rendering UI element.
 ///
@@ -6,26 +6,43 @@ use crate::border::Border;
 /// Each line must not exceed `width` visible columns.
 pub trait Widget {
     /// Render to lines for the given terminal width.
-    fn render(&mut self, width: u16) -> Vec<String>;
+    fn render(&mut self, width: usize) -> Vec<String>;
 
     /// Return cursor position (row, col) relative to this widget's output.
     /// Only meaningful for interactive widgets like Editor.
-    fn cursor(&mut self, _width: u16) -> Option<(usize, usize)> {
+    fn cursor(&mut self, _width: usize) -> Option<(usize, usize)> {
         None
     }
 }
 
 pub trait WidgetExt<'a>: Widget + Sized {
-    fn pad(&'a mut self, top: usize, right: usize, bottom: usize, left: usize) -> Border<'a, Self> {
-        Border::pad(self, top, right, bottom, left)
+    fn pad(&'a mut self, top: usize, right: usize, bottom: usize, left: usize) -> Block<'a, Self> {
+        Block::new(self)
+            .top(HorizontalBorder::pad(top))
+            .right(VerticalBorder::pad(right))
+            .bottom(HorizontalBorder::pad(bottom))
+            .left(VerticalBorder::pad(left))
     }
 
-    fn ascii(&'a mut self) -> Border<'a, Self> {
-        Border::ascii(self)
+    fn ascii(&'a mut self) -> Block<'a, Self> {
+        Block::new(self)
+            .top(
+                HorizontalBorder::new("-".to_string())
+                    .left("+".to_string())
+                    .right("+".to_string()),
+            )
+            .bottom(
+                HorizontalBorder::new("-".to_string())
+                    .left("+".to_string())
+                    .right("+".to_string()),
+            )
+            .left(VerticalBorder::repeat("|".to_string()))
+            .right(VerticalBorder::repeat("|".to_string()))
+        //.bottom(BlockBorder::new("-".to_string(), 1))
     }
 
-    fn line_numbers(&'a mut self, width: usize) -> Border<'a, Self> {
-        Border::line_numbers(self, width)
+    fn line_numbers(&'a mut self, w: usize) -> Block<'a, Self> {
+        Block::new(self).left(VerticalBorder::counter(w))
     }
 }
 

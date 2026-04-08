@@ -1,9 +1,10 @@
-mod border;
+mod block;
 #[cfg(feature = "capture")]
 mod capture;
 mod context;
 mod editor;
 mod format;
+//mod layout;
 mod message;
 mod screen;
 #[cfg(feature = "capture")]
@@ -111,6 +112,7 @@ async fn agent_task<P>(
 }
 
 async fn run(args: Args) -> Result<()> {
+    /*
     #[cfg(feature = "capture")]
     {
         use crate::capture::{self, AudioCapture};
@@ -140,6 +142,7 @@ async fn run(args: Args) -> Result<()> {
 
         println!("ending listen");
     }
+    */
 
     let ctx = Context::new(args.path)?;
     debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
@@ -158,7 +161,7 @@ async fn run(args: Args) -> Result<()> {
     let mut prompt = Editor::new();
     let mut blocks: Vec<Message> = Vec::new();
     let mut current_cancel: Option<Cancel> = None;
-    let mut spinner = Spinner::new(Spinner::ASCII);
+    let mut spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
 
     loop {
         let mut frame = screen.begin()?;
