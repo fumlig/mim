@@ -4,15 +4,15 @@ use crate::block::{Block, HorizontalBorder, VerticalBorder};
 ///
 /// Widgets hold their own state and produce lines when asked.
 /// Each line must not exceed `width` visible columns.
+///
+/// Widgets that want to claim the hardware cursor embed
+/// [`crate::format::CURSOR_MARKER`] at the desired position in their own
+/// rendered output while they're focused. Containers don't need to know
+/// anything about it — the marker rides along inside the rendered strings
+/// and is extracted by the screen at the end of the render pass.
 pub trait Widget {
     /// Render to lines for the given terminal width.
     fn render(&mut self, width: usize) -> Vec<String>;
-
-    /// Return cursor position (row, col) relative to this widget's output.
-    /// Only meaningful for interactive widgets like Editor.
-    fn cursor(&mut self, _width: usize) -> Option<(usize, usize)> {
-        None
-    }
 }
 
 pub trait WidgetExt<'a>: Widget + Sized {

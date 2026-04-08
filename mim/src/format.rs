@@ -1,6 +1,34 @@
 use std::iter;
 use unicode_width::UnicodeWidthChar;
 
+/// Zero-width APC escape sequence used by focusable widgets to mark the
+/// desired hardware cursor position in their rendered output.
+///
+/// Terminals that don't recognize the `mim:c` application identifier ignore
+/// the whole sequence, so it occupies no visual cells and passes through
+/// concatenation, padding, and width-aware truncation unchanged. The screen
+/// extracts the marker at the end of each render pass (see
+/// [`extract_cursor`]) to find where to place the real cursor.
+pub const CURSOR_MARKER: &str = "\x1b_mim:c\x07";
+
+/// Scan `lines` bottom-up for [`CURSOR_MARKER`]. On the first line that
+/// contains one, compute its visible column (ANSI-aware), strip the marker
+/// from the line in place, and return `(row, col)`.
+///
+/// Scanning bottom-up means that in a scrolling transcript the focused
+/// widget (typically rendered last) is found immediately.
+pub fn extract_cursor(lines: &mut [String]) -> Option<(usize, usize)> {
+    for row in (0..lines.len()).rev() {
+        if let Some(idx) = lines[row].find(CURSOR_MARKER) {
+            let col = visible_width(&lines[row][..idx]);
+            let end = idx + CURSOR_MARKER.len();
+            lines[row].replace_range(idx..end, "");
+            return Some((row, col));
+        }
+    }
+    None
+}
+
 /// A segment of text: either an ANSI escape sequence or a visible character.
 enum Segment<'a> {
     /// An escape sequence (zero visible width).
@@ -326,6 +354,65 @@ mod tests {
     fn test_visible_width_ansi() {
         assert_eq!(visible_width("\x1b[31mhello\x1b[0m"), 5);
         assert_eq!(visible_width("\x1b[1;32mfoo\x1b[0m"), 3);
+    }
+
+    #[test]
+    fn cursor_marker_has_zero_visible_width() {
+        assert_eq!(visible_width(CURSOR_MARKER), 0);
+        let s = format!("abc{CURSOR_MARKER}def");
+        assert_eq!(visible_width(&s), 6);
+    }
+
+    #[test]
+    fn extract_cursor_none_when_absent() {
+        let mut lines = vec!["hello".to_string(), "world".to_string()];
+        assert_eq!(extract_cursor(&mut lines), None);
+        assert_eq!(lines, vec!["hello".to_string(), "world".to_string()]);
+    }
+
+    #[test]
+    fn extract_cursor_finds_and_strips() {
+        let mut lines = vec![
+            "hello".to_string(),
+            format!("ab{CURSOR_MARKER}cd"),
+            "tail".to_string(),
+        ];
+        assert_eq!(extract_cursor(&mut lines), Some((1, 2)));
+        assert_eq!(lines[1], "abcd");
+    }
+
+    #[test]
+    fn extract_cursor_ignores_ansi_before_marker() {
+        // Column should count visible chars only, not the ANSI bytes.
+        let mut lines = vec![format!("\x1b[31mhi\x1b[0m{CURSOR_MARKER}x")];
+        assert_eq!(extract_cursor(&mut lines), Some((0, 2)));
+        // Marker removed; ANSI styling preserved.
+        assert_eq!(lines[0], "\x1b[31mhi\x1b[0mx");
+    }
+
+    #[test]
+    fn extract_cursor_scans_bottom_up() {
+        // When (somehow) two markers are present, the bottom one wins.
+        let mut lines = vec![
+            format!("top{CURSOR_MARKER}"),
+            format!("bot{CURSOR_MARKER}tom"),
+        ];
+        assert_eq!(extract_cursor(&mut lines), Some((1, 3)));
+        // Only the found marker is stripped; the other survives (harmless,
+        // zero-width). In mim's actual use this case doesn't arise because
+        // only one widget emits the marker.
+        assert_eq!(lines[1], "bottom");
+        assert!(lines[0].contains(CURSOR_MARKER));
+    }
+
+    #[test]
+    fn extract_cursor_respects_padding() {
+        // Simulates what Block does: prepend a few spaces of padding to a
+        // child line that already contains the marker.
+        let child = format!("hi{CURSOR_MARKER}");
+        let padded = format!("    {child}");
+        let mut lines = vec![padded];
+        assert_eq!(extract_cursor(&mut lines), Some((0, 6)));
     }
 
     #[test]

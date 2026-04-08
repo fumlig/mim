@@ -4,7 +4,7 @@ mod capture;
 mod context;
 mod editor;
 mod format;
-//mod layout;
+mod layout;
 mod message;
 mod screen;
 #[cfg(feature = "capture")]
@@ -175,7 +175,9 @@ async fn run(args: Args) -> Result<()> {
             frame.add(&mut spinner);
         }
         {
-            frame.add_focused(
+            // The editor is always focused; it embeds CURSOR_MARKER in its
+            // own rendered output, and Screen::end extracts it.
+            frame.add(
                 &mut prompt
                     .pad(0, 0, 0, 1)
                     .line_numbers(2)

@@ -1,5 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
+use crate::format::CURSOR_MARKER;
 use crate::widget::Widget;
 
 /// Action returned by [`Editor::handle`].
@@ -20,6 +21,11 @@ pub enum EditorAction {
 pub struct Editor {
     buf: Vec<char>,
     cursor: usize,
+    /// When true, `render` paints the reverse-video cursor block and embeds
+    /// [`CURSOR_MARKER`] next to it so the screen can place the real
+    /// hardware cursor there. Defaults to true because mim currently only
+    /// ever shows a single editor and it is always focused.
+    pub focused: bool,
 }
 
 impl Editor {
@@ -27,6 +33,7 @@ impl Editor {
         Self {
             buf: Vec::new(),
             cursor: 0,
+            focused: true,
         }
     }
 
@@ -331,36 +338,35 @@ fn line_breaks(chars: &[char], max_width: usize) -> Vec<usize> {
 
 impl Widget for Editor {
     fn render(&mut self, width: usize) -> Vec<String> {
-        let width = width as usize;
         if width == 0 {
             return vec![String::new()];
         }
 
         let (mut lines, crow, ccol) = self.layout(width);
 
-        // Draw reverse-video cursor character on the cursor line.
-        if let Some(line) = lines.get_mut(crow) {
-            let chars: Vec<char> = line.chars().collect();
-            if ccol < chars.len() {
-                let before: String = chars[..ccol].iter().collect();
-                let cursor_ch = chars[ccol];
-                let after: String = chars[ccol + 1..].iter().collect();
-                *line = format!("{before}\x1b[7m{cursor_ch}\x1b[27m{after}");
-            } else {
-                line.push_str("\x1b[7m \x1b[27m");
+        // Only the focused editor paints a cursor. Both the visible
+        // reverse-video block and the zero-width CURSOR_MARKER come from the
+        // same (crow, ccol) computed by a single `layout` call, so the
+        // painted cursor and the hardware cursor cannot end up on different
+        // cells.
+        if self.focused {
+            if let Some(line) = lines.get_mut(crow) {
+                let chars: Vec<char> = line.chars().collect();
+                if ccol < chars.len() {
+                    let before: String = chars[..ccol].iter().collect();
+                    let cursor_ch = chars[ccol];
+                    let after: String = chars[ccol + 1..].iter().collect();
+                    *line = format!(
+                        "{before}{CURSOR_MARKER}\x1b[7m{cursor_ch}\x1b[27m{after}"
+                    );
+                } else {
+                    line.push_str(CURSOR_MARKER);
+                    line.push_str("\x1b[7m \x1b[27m");
+                }
             }
         }
 
         lines
-    }
-
-    fn cursor(&mut self, width: usize) -> Option<(usize, usize)> {
-        let width = width as usize;
-        if width == 0 {
-            return Some((0, 0));
-        }
-        let (_, row, col) = self.layout(width);
-        Some((row, col))
     }
 }
 

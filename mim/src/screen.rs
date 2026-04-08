@@ -9,11 +9,15 @@ use crossterm::{
 };
 use futures::StreamExt;
 
-use crate::format::truncate_to_width;
+use crate::format::{extract_cursor, truncate_to_width};
 use crate::widget::Widget;
 
 /// Per-render frame. Accumulates lines from widgets and raw text.
-/// Created by [`Renderer::begin`], consumed by [`Renderer::end`].
+/// Created by [`Screen::begin`], consumed by [`Screen::end`].
+///
+/// The hardware cursor position is not stored on the frame: focused widgets
+/// embed [`crate::format::CURSOR_MARKER`] in their rendered lines, and
+/// [`Screen::end`] extracts it once all widgets have been added.
 pub struct Frame {
     /// Rendered lines.
     lines: Vec<String>,
@@ -21,8 +25,6 @@ pub struct Frame {
     width: usize,
     /// Terminal height at frame creation.
     height: usize,
-    /// Hardware cursor position requested by the focused widget (absolute row, col).
-    cursor: Option<(usize, usize)>,
     /// When set, all reachable lines are rewritten regardless of diff.
     reset: bool,
 }
@@ -44,22 +46,12 @@ impl Frame {
     }
 
     /// Append a widget's rendered lines.
+    ///
+    /// If the widget is focused, it will have embedded
+    /// [`crate::format::CURSOR_MARKER`] in its output; [`Screen::end`] finds
+    /// the marker and places the hardware cursor accordingly.
     pub fn add(&mut self, widget: &mut impl Widget) {
         self.lines.extend(widget.render(self.width));
-    }
-
-    /// Append a widget's rendered lines and track its cursor position.
-    ///
-    /// Only one widget per frame should be focused. The terminal's hardware
-    /// cursor will be placed at the position reported by [`Widget::cursor`].
-    pub fn add_focused(&mut self, widget: &mut impl Widget) {
-        let base_row = self.lines.len();
-        // Render first so the widget can update internal layout state
-        // (e.g. scroll offset) before we query cursor position.
-        self.lines.extend(widget.render(self.width));
-        if let Some((row, col)) = widget.cursor(self.width) {
-            self.cursor = Some((base_row + row, col));
-        }
     }
 
     /// Append a single pre-formatted line.
@@ -173,17 +165,20 @@ impl Screen {
             lines: Vec::new(),
             width: width as usize,
             height: height as usize,
-            cursor: None,
             reset: false,
         })
     }
 
     /// End render pass and show frame in terminal.
-    pub fn end(&mut self, frame: Frame) -> io::Result<()> {
+    pub fn end(&mut self, mut frame: Frame) -> io::Result<()> {
         let mut stdout = io::stdout();
 
         queue!(stdout, BeginSynchronizedUpdate)?;
 
+        // Extract the cursor marker once all widgets have rendered and
+        // strip it from the lines in place. This must happen before the
+        // diff so `last_frame` and `next` compare stripped-to-stripped.
+        let cursor = extract_cursor(&mut frame.lines);
         let next = frame;
 
         if let Some(last) = self.last_frame.take() {
@@ -196,7 +191,7 @@ impl Screen {
             self.full_render(&mut stdout, &next, false)
         }?;
 
-        if let Some((row, col)) = next.cursor {
+        if let Some((row, col)) = cursor {
             self.move_cursor(&mut stdout, row, col)?;
             queue!(&mut stdout, Show)?;
         } else {

@@ -187,44 +187,17 @@ impl<'a, W: Widget> Widget for Block<'a, W> {
         lines
     }
 
-    fn cursor(&mut self, width: usize) -> Option<(usize, usize)> {
-        let row_offset = self.top.as_ref().map_or(0, |top| top.h);
-        let col_offset = self.left.as_ref().map_or(0, |left| left.w);
-
-        // Must mirror the width math in `render` so the child computes its
-        // layout (including word wrapping) against the same width it was
-        // rendered with. Otherwise the reverse-video cursor drawn inside the
-        // child and the hardware cursor end up at different positions,
-        // making it look like there are multiple cursors.
-        let mut child_width = width;
-        if let Some(left) = self.left.as_ref() {
-            child_width = child_width.saturating_sub(left.w);
-        }
-        if let Some(right) = self.right.as_ref() {
-            child_width = child_width.saturating_sub(right.w);
-        }
-
-        self.child
-            .cursor(child_width)
-            .map(|(row, col)| (row + row_offset, col + col_offset))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::editor::Editor;
+    use crate::format::extract_cursor;
     use crate::widget::WidgetExt;
 
-    /// Regression: `Block::cursor` used to forward the outer width to the
-    /// child, so the child laid out its content against a different width
-    /// than `Block::render` had used. When the editor content wrapped, the
-    /// hardware cursor and the editor's reverse-video cursor block landed on
-    /// different cells, visually producing two cursors.
-    #[test]
-    fn cursor_matches_render_when_child_wraps() {
-        let mut editor = Editor::new();
-        for c in "hello world".chars() {
+    fn type_into(editor: &mut Editor, s: &str) {
+        for c in s.chars() {
             editor.handle(crossterm::event::Event::Key(
                 crossterm::event::KeyEvent::new(
                     crossterm::event::KeyCode::Char(c),
@@ -232,6 +205,21 @@ mod tests {
                 ),
             ));
         }
+    }
+
+    /// Regression: the cursor extracted from the rendered output must land
+    /// on the same line and inside the same inner area as the painted
+    /// reverse-video cursor, even when the child wraps.
+    ///
+    /// Before the marker-based approach this was enforced by having
+    /// `Block::cursor` mirror the width math in `Block::render` and was
+    /// easy to get wrong — the two had to agree by hand. With the marker
+    /// approach both come from the same `render` call, but this test still
+    /// exercises the "bordered block + wrapping child" path end-to-end.
+    #[test]
+    fn extracted_cursor_matches_rendered_cursor_when_child_wraps() {
+        let mut editor = Editor::new();
+        type_into(&mut editor, "hello world");
 
         // Outer width 12, with 2 columns of left border and 1 column of
         // right border → inner width 9, which forces "hello world" to wrap
@@ -241,11 +229,11 @@ mod tests {
             .left(VerticalBorder::pad(2))
             .right(VerticalBorder::pad(1));
 
-        let lines = block.render(outer_width);
-        let (row, col) = block.cursor(outer_width).expect("cursor");
+        let mut lines = block.render(outer_width);
+        let (row, col) = extract_cursor(&mut lines).expect("cursor");
 
         // The cursor must be on the line that contains the reverse-video
-        // escape sequence — i.e. the same line the editor drew the cursor on.
+        // escape sequence — the marker was injected on exactly that line.
         assert!(
             lines[row].contains("\x1b[7m"),
             "cursor row {row} does not contain the rendered cursor: {lines:?}"
@@ -268,19 +256,12 @@ mod tests {
     }
 
     /// Regression: when the editor's content exactly fills the inner width
-    /// of a bordered block, the cursor used to land on the right border
-    /// column. It should wrap onto a fresh visual row instead.
+    /// of a bordered block, the cursor must wrap to a new visual row at
+    /// column 0 of the inner area instead of landing on the right border.
     #[test]
-    fn cursor_does_not_land_on_right_border_at_exact_fill() {
+    fn extracted_cursor_does_not_land_on_right_border_at_exact_fill() {
         let mut editor = Editor::new();
-        for c in "abcdefghi".chars() {
-            editor.handle(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(c),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
-        }
+        type_into(&mut editor, "abcdefghi");
 
         // Outer width 12 → inner width 9, matches the typed length exactly.
         let outer_width = 12;
@@ -288,10 +269,9 @@ mod tests {
             .left(VerticalBorder::pad(2))
             .right(VerticalBorder::pad(1));
 
-        let lines = block.render(outer_width);
-        let (row, col) = block.cursor(outer_width).expect("cursor");
+        let mut lines = block.render(outer_width);
+        let (row, col) = extract_cursor(&mut lines).expect("cursor");
 
-        // Cursor wraps to a new visual row at column 0 of the inner area.
         assert_eq!(col, 2, "cursor should sit at the start of the inner area");
         assert!(
             row >= 1,

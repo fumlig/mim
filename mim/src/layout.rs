@@ -27,26 +27,30 @@
 use crate::format::pad_to_width;
 use crate::widget::Widget;
 
+// Cursor positioning is handled by `format::CURSOR_MARKER`: focused widgets
+// embed a zero-width marker in their rendered output and the screen extracts
+// it at the end of the render pass. Containers in this file don't need to
+// know anything about cursors — the marker travels inside the rendered
+// strings, shifts its visible column automatically when a parent prepends
+// padding, and has its row pinned by the index of the line that carries it.
+// That's why these stacks no longer have `heights`/`widths` caches or a
+// `cursor` method.
+
+
 // ── VStack ──────────────────────────────────────────────────────────
 
 /// Stacks children vertically, top to bottom.
 ///
 /// Every child is rendered at the full available width and the resulting
-/// lines are concatenated. Cursor position from the first child that
-/// reports one is forwarded, with rows offset by the heights of the
-/// preceding children.
+/// lines are concatenated.
 pub struct VStack<'a> {
     children: Vec<&'a mut dyn Widget>,
-    /// Heights of each child from the most recent `render` call. Used by
-    /// `cursor` so we don't have to re-render to compute row offsets.
-    heights: Vec<usize>,
 }
 
 impl<'a> VStack<'a> {
     pub fn new() -> Self {
         Self {
             children: Vec::new(),
-            heights: Vec::new(),
         }
     }
 
@@ -65,27 +69,11 @@ impl<'a> Default for VStack<'a> {
 
 impl<'a> Widget for VStack<'a> {
     fn render(&mut self, width: usize) -> Vec<String> {
-        self.heights.clear();
-        self.heights.reserve(self.children.len());
-
         let mut lines = Vec::new();
         for child in &mut self.children {
-            let child_lines = child.render(width);
-            self.heights.push(child_lines.len());
-            lines.extend(child_lines);
+            lines.extend(child.render(width));
         }
         lines
-    }
-
-    fn cursor(&mut self, width: usize) -> Option<(usize, usize)> {
-        let mut row = 0;
-        for (i, child) in self.children.iter_mut().enumerate() {
-            if let Some((cr, cc)) = child.cursor(width) {
-                return Some((row + cr, cc));
-            }
-            row += self.heights.get(i).copied().unwrap_or(0);
-        }
-        None
     }
 }
 
@@ -131,25 +119,18 @@ enum Height {
 /// variant the stack falls back to the natural maximum height, so the
 /// output is never silently empty.
 ///
-/// Cursor position from the first child that reports one is forwarded,
-/// with the column offset by the widths of the preceding children.
-///
 /// [`fixed`]: HStack::fixed
 /// [`fill`]: HStack::fill
 /// [`fixed_clip`]: HStack::fixed_clip
 /// [`fill_clip`]: HStack::fill_clip
 pub struct HStack<'a> {
     children: Vec<(&'a mut dyn Widget, Size, Height)>,
-    /// Column widths assigned to each child by the most recent `render`
-    /// call. Used by `cursor`.
-    widths: Vec<usize>,
 }
 
 impl<'a> HStack<'a> {
     pub fn new() -> Self {
         Self {
             children: Vec::new(),
-            widths: Vec::new(),
         }
     }
 
@@ -236,7 +217,6 @@ impl<'a> Default for HStack<'a> {
 impl<'a> Widget for HStack<'a> {
     fn render(&mut self, width: usize) -> Vec<String> {
         let widths = self.layout(width);
-        self.widths = widths.clone();
 
         // Snapshot height policies before we borrow `children` mutably
         // to render them.
@@ -288,20 +268,6 @@ impl<'a> Widget for HStack<'a> {
         }
         lines
     }
-
-    fn cursor(&mut self, _width: usize) -> Option<(usize, usize)> {
-        // Snapshot widths so we can iterate `children` mutably.
-        let widths = self.widths.clone();
-        let mut col = 0;
-        for (i, (child, _, _)) in self.children.iter_mut().enumerate() {
-            let w = widths.get(i).copied().unwrap_or(0);
-            if let Some((cr, cc)) = child.cursor(w) {
-                return Some((cr, col + cc));
-            }
-            col += w;
-        }
-        None
-    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -309,6 +275,7 @@ impl<'a> Widget for HStack<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::{extract_cursor, CURSOR_MARKER};
 
     /// Single-line text widget.
     struct Text(&'static str);
@@ -326,14 +293,17 @@ mod tests {
         }
     }
 
-    /// Widget with a cursor at a fixed (row, col).
-    struct Cur(&'static str, usize, usize);
-    impl Widget for Cur {
+    /// Widget that paints a visible column and embeds `CURSOR_MARKER` at
+    /// `marker_col` on its only line — used to test that containers
+    /// propagate the cursor position correctly through row/column offsets.
+    struct MarkerCell {
+        text: &'static str,
+        marker_col: usize,
+    }
+    impl Widget for MarkerCell {
         fn render(&mut self, _width: usize) -> Vec<String> {
-            vec![self.0.to_string()]
-        }
-        fn cursor(&mut self, _width: usize) -> Option<(usize, usize)> {
-            Some((self.1, self.2))
+            let (before, after) = self.text.split_at(self.marker_col);
+            vec![format!("{before}{CURSOR_MARKER}{after}")]
         }
     }
 
@@ -352,19 +322,20 @@ mod tests {
     #[test]
     fn vstack_cursor_offset() {
         let mut a = Multi(vec!["aa", "bb", "cc"]); // 3 rows
-        let mut b = Cur("xy", 0, 1); // cursor at (0, 1) in itself
+        let mut b = MarkerCell { text: "xy", marker_col: 1 };
         let mut v = VStack::new().add(&mut a).add(&mut b);
-        // Render first so heights are populated.
-        let _ = v.render(10);
-        // Cursor row should be offset by 3 rows of `a`.
-        assert_eq!(v.cursor(10), Some((3, 1)));
+        let mut lines = v.render(10);
+        // Cursor row should be offset by 3 rows of `a`; column comes from
+        // the marker's position inside `b`'s line.
+        assert_eq!(extract_cursor(&mut lines), Some((3, 1)));
     }
 
     #[test]
     fn vstack_empty() {
         let mut v = VStack::new();
-        assert!(v.render(10).is_empty());
-        assert_eq!(v.cursor(10), None);
+        let mut lines = v.render(10);
+        assert!(lines.is_empty());
+        assert_eq!(extract_cursor(&mut lines), None);
     }
 
     // ── HStack ──────────────────────────────────────────────────────
@@ -373,7 +344,6 @@ mod tests {
     fn hstack_layout_fixed_and_fill() {
         let v = HStack {
             children: Vec::new(),
-            widths: Vec::new(),
         }
         .layout(20);
         assert!(v.is_empty());
@@ -432,19 +402,22 @@ mod tests {
 
     #[test]
     fn hstack_cursor_offset() {
-        let mut a = Text("aaa"); // width 5
-        let mut b = Cur("xy", 0, 1); // width = remaining
+        let mut a = Text("aaa"); // width 5 (fixed)
+        let mut b = MarkerCell { text: "xy", marker_col: 1 };
         let mut h = HStack::new().fixed(&mut a, 5).fill(&mut b);
-        let _ = h.render(10);
-        // Cursor in b is (0, 1); column offset by a's width (5).
-        assert_eq!(h.cursor(10), Some((0, 6)));
+        let mut lines = h.render(10);
+        // The marker sits at visible column 1 inside `b`'s output, and `b`
+        // starts at column 5 in the combined row, so the cursor lands at
+        // (row 0, col 6).
+        assert_eq!(extract_cursor(&mut lines), Some((0, 6)));
     }
 
     #[test]
     fn hstack_empty() {
         let mut h = HStack::new();
-        assert!(h.render(10).is_empty());
-        assert_eq!(h.cursor(10), None);
+        let mut lines = h.render(10);
+        assert!(lines.is_empty());
+        assert_eq!(extract_cursor(&mut lines), None);
     }
 
     #[test]
