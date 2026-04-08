@@ -18,39 +18,64 @@ pub enum EditorAction {
 }
 
 /// Multiline text editor widget with word wrapping.
+///
+/// The buffer is stored as a vector of logical lines (one `Vec<char>` per
+/// line) and the cursor lives in the same coordinate system as the buffer:
+/// `row` indexes into `lines`, `col` indexes into `lines[row]`. There is
+/// no separate "buffer position → display position" translation step.
+///
+/// During [`Widget::render`], the cursor is materialised by injecting
+/// [`CURSOR_MARKER`] (and a reverse-video block) directly into the segment
+/// of the wrapped output that contains it. The screen extracts the marker
+/// later to position the hardware cursor; nothing in this module needs to
+/// know or return display row/col coordinates.
 pub struct Editor {
-    buf: Vec<char>,
-    cursor: usize,
+    /// Logical lines. Always non-empty: an "empty" editor is
+    /// `vec![Vec::new()]`, not `vec![]`. This invariant lets every method
+    /// index `lines[row]` without bounds checks.
+    lines: Vec<Vec<char>>,
+    /// Cursor row (`0..lines.len()`).
+    row: usize,
+    /// Cursor column within `lines[row]` (`0..=lines[row].len()`).
+    col: usize,
     /// When true, `render` paints the reverse-video cursor block and embeds
-    /// [`CURSOR_MARKER`] next to it so the screen can place the real
-    /// hardware cursor there. Defaults to true because mim currently only
-    /// ever shows a single editor and it is always focused.
+    /// [`CURSOR_MARKER`] next to it. Defaults to true because mim currently
+    /// only ever shows a single editor and it is always focused.
     pub focused: bool,
 }
 
 impl Editor {
     pub fn new() -> Self {
         Self {
-            buf: Vec::new(),
-            cursor: 0,
+            lines: vec![Vec::new()],
+            row: 0,
+            col: 0,
             focused: true,
         }
     }
 
-    /// The current input text.
+    /// The current input text, with logical lines joined by `\n`.
     pub fn text(&self) -> String {
-        self.buf.iter().collect()
+        let mut s = String::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            if i > 0 {
+                s.push('\n');
+            }
+            s.extend(line.iter());
+        }
+        s
     }
 
-    /// Whether the input buffer is empty.
+    /// Whether the input buffer is empty (single empty line).
     pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
+        self.lines.len() == 1 && self.lines[0].is_empty()
     }
 
     /// Clear the input buffer and reset cursor.
     pub fn clear(&mut self) {
-        self.buf.clear();
-        self.cursor = 0;
+        self.lines = vec![Vec::new()];
+        self.row = 0;
+        self.col = 0;
     }
 
     /// Process a crossterm event. Returns an action if one was triggered.
@@ -66,12 +91,12 @@ impl Editor {
 
         match key.code {
             KeyCode::Char('d') if ctrl => {
-                if self.buf.is_empty() {
+                if self.is_empty() {
                     return Some(EditorAction::Eof);
                 }
             }
             KeyCode::Char('c') if ctrl => {
-                if self.buf.is_empty() {
+                if self.is_empty() {
                     return Some(EditorAction::Interrupt);
                 }
                 self.clear();
@@ -85,64 +110,88 @@ impl Editor {
 
             // Submit
             KeyCode::Enter if !ctrl && !shift && !alt => {
-                let text: String = self.buf.drain(..).collect();
-                self.cursor = 0;
+                let text = self.text();
+                self.clear();
                 return Some(EditorAction::Submit(text));
             }
 
             // Insert newline
             KeyCode::Enter if shift || alt => {
-                self.buf.insert(self.cursor, '\n');
-                self.cursor += 1;
+                self.insert_newline();
             }
             KeyCode::Char('j') if ctrl => {
-                self.buf.insert(self.cursor, '\n');
-                self.cursor += 1;
+                self.insert_newline();
             }
 
             // Navigation
             KeyCode::Left if !ctrl => {
-                self.cursor = self.cursor.saturating_sub(1);
+                if self.col > 0 {
+                    self.col -= 1;
+                } else if self.row > 0 {
+                    self.row -= 1;
+                    self.col = self.lines[self.row].len();
+                }
             }
             KeyCode::Right if !ctrl => {
-                self.cursor = (self.cursor + 1).min(self.buf.len());
+                if self.col < self.lines[self.row].len() {
+                    self.col += 1;
+                } else if self.row + 1 < self.lines.len() {
+                    self.row += 1;
+                    self.col = 0;
+                }
             }
             KeyCode::Up if !ctrl => {
-                self.move_vertical(-1);
+                if self.row > 0 {
+                    self.row -= 1;
+                    self.col = self.col.min(self.lines[self.row].len());
+                }
             }
             KeyCode::Down if !ctrl => {
-                self.move_vertical(1);
+                if self.row + 1 < self.lines.len() {
+                    self.row += 1;
+                    self.col = self.col.min(self.lines[self.row].len());
+                }
             }
             KeyCode::Home | KeyCode::Char('a') if ctrl || matches!(key.code, KeyCode::Home) => {
-                self.cursor = self.line_start(self.cursor);
+                self.col = 0;
             }
             KeyCode::End | KeyCode::Char('e') if ctrl || matches!(key.code, KeyCode::End) => {
-                self.cursor = self.line_end(self.cursor);
+                self.col = self.lines[self.row].len();
             }
 
             // Deletion
             KeyCode::Backspace if !ctrl => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                    self.buf.remove(self.cursor);
+                if self.col > 0 {
+                    self.col -= 1;
+                    self.lines[self.row].remove(self.col);
+                } else if self.row > 0 {
+                    let curr = self.lines.remove(self.row);
+                    self.row -= 1;
+                    self.col = self.lines[self.row].len();
+                    self.lines[self.row].extend(curr);
                 }
             }
             KeyCode::Delete if !ctrl => {
-                if self.cursor < self.buf.len() {
-                    self.buf.remove(self.cursor);
+                if self.col < self.lines[self.row].len() {
+                    self.lines[self.row].remove(self.col);
+                } else if self.row + 1 < self.lines.len() {
+                    let next = self.lines.remove(self.row + 1);
+                    self.lines[self.row].extend(next);
                 }
             }
             KeyCode::Char('u') if ctrl => {
-                let start = self.line_start(self.cursor);
-                self.buf.drain(start..self.cursor);
-                self.cursor = start;
+                self.lines[self.row].drain(..self.col);
+                self.col = 0;
             }
             KeyCode::Char('k') if ctrl => {
-                let end = self.line_end(self.cursor);
-                if end == self.cursor && self.cursor < self.buf.len() {
-                    self.buf.remove(self.cursor);
+                if self.col == self.lines[self.row].len() {
+                    // At end of line — join with next line if any.
+                    if self.row + 1 < self.lines.len() {
+                        let next = self.lines.remove(self.row + 1);
+                        self.lines[self.row].extend(next);
+                    }
                 } else {
-                    self.buf.drain(self.cursor..end);
+                    self.lines[self.row].truncate(self.col);
                 }
             }
             KeyCode::Char('w') if ctrl => {
@@ -151,8 +200,8 @@ impl Editor {
 
             // Character input
             KeyCode::Char(c) if !ctrl => {
-                self.buf.insert(self.cursor, c);
-                self.cursor += 1;
+                self.lines[self.row].insert(self.col, c);
+                self.col += 1;
             }
 
             _ => {}
@@ -160,136 +209,26 @@ impl Editor {
         None
     }
 
-    /// Index of the start of the logical line containing `pos`.
-    fn line_start(&self, pos: usize) -> usize {
-        self.buf[..pos]
-            .iter()
-            .rposition(|&c| c == '\n')
-            .map_or(0, |i| i + 1)
-    }
-
-    /// Index of the end of the logical line containing `pos` (the '\n' or buf.len()).
-    fn line_end(&self, pos: usize) -> usize {
-        self.buf[pos..]
-            .iter()
-            .position(|&c| c == '\n')
-            .map_or(self.buf.len(), |i| pos + i)
-    }
-
-    /// Column offset of `pos` within its logical line.
-    fn column(&self, pos: usize) -> usize {
-        pos - self.line_start(pos)
-    }
-
-    /// Move the cursor up (delta = -1) or down (delta = 1) by one logical line,
-    /// preserving column position as much as possible.
-    fn move_vertical(&mut self, delta: isize) {
-        let col = self.column(self.cursor);
-        if delta < 0 {
-            let start = self.line_start(self.cursor);
-            if start == 0 {
-                return;
-            }
-            let prev_end = start - 1;
-            let prev_start = self.line_start(prev_end);
-            let prev_len = prev_end - prev_start;
-            self.cursor = prev_start + col.min(prev_len);
-        } else {
-            let end = self.line_end(self.cursor);
-            if end == self.buf.len() {
-                return;
-            }
-            let next_start = end + 1;
-            let next_end = self.line_end(next_start);
-            let next_len = next_end - next_start;
-            self.cursor = next_start + col.min(next_len);
-        }
+    /// Split the current line at the cursor and move the cursor to the
+    /// start of the new line.
+    fn insert_newline(&mut self) {
+        let tail = self.lines[self.row].split_off(self.col);
+        self.lines.insert(self.row + 1, tail);
+        self.row += 1;
+        self.col = 0;
     }
 
     /// Delete the word before the cursor (Ctrl+W), stopping at line start.
     fn delete_word_back(&mut self) {
-        let stop = self.line_start(self.cursor);
-        while self.cursor > stop && self.buf[self.cursor - 1] == ' ' {
-            self.cursor -= 1;
-            self.buf.remove(self.cursor);
+        let line = &mut self.lines[self.row];
+        while self.col > 0 && line[self.col - 1] == ' ' {
+            self.col -= 1;
+            line.remove(self.col);
         }
-        while self.cursor > stop && self.buf[self.cursor - 1] != ' ' {
-            self.cursor -= 1;
-            self.buf.remove(self.cursor);
+        while self.col > 0 && line[self.col - 1] != ' ' {
+            self.col -= 1;
+            line.remove(self.col);
         }
-    }
-
-    /// Build the display lines and locate the cursor within them.
-    /// Returns (lines, cursor_row, cursor_col).
-    fn layout(&self, width: usize) -> (Vec<String>, usize, usize) {
-        let w = width.max(1);
-        let text: String = self.buf.iter().collect();
-        let logical_lines: Vec<&str> = text.split('\n').collect();
-
-        let mut display_lines: Vec<String> = Vec::new();
-        let mut cursor_row = 0;
-        let mut cursor_col = 0;
-        let mut buf_offset: usize = 0;
-
-        for (li, &logical_line) in logical_lines.iter().enumerate() {
-            let chars: Vec<char> = logical_line.chars().collect();
-            let breaks = line_breaks(&chars, w);
-
-            if self.cursor >= buf_offset {
-                let cursor_in_line = self.cursor - buf_offset;
-                if cursor_in_line <= chars.len() {
-                    for (si, &seg_start) in breaks.iter().enumerate() {
-                        let seg_end = breaks.get(si + 1).copied().unwrap_or(chars.len());
-                        if cursor_in_line < seg_end
-                            || (cursor_in_line == seg_end && si == breaks.len() - 1)
-                        {
-                            cursor_row = display_lines.len() + si;
-                            cursor_col = cursor_in_line - seg_start;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            for (si, &seg_start) in breaks.iter().enumerate() {
-                let seg_end = breaks.get(si + 1).copied().unwrap_or(chars.len());
-
-                let mut end = seg_end;
-                if si < breaks.len() - 1 {
-                    while end > seg_start && chars[end - 1] == ' ' {
-                        end -= 1;
-                    }
-                }
-
-                let content: String = chars[seg_start..end].iter().collect();
-                display_lines.push(content);
-            }
-
-            buf_offset += chars.len();
-            if li < logical_lines.len() - 1 {
-                buf_offset += 1;
-            }
-        }
-
-        if display_lines.is_empty() {
-            display_lines.push(String::new());
-        }
-
-        // When the cursor sits at column `w` it is one past the last visible
-        // column of a fully-filled segment. If we left it there the reverse-
-        // video cursor block (and the hardware cursor) would land on top of
-        // whatever sits to the right of the editor — e.g. the block border
-        // in the main UI. Wrap it to column 0 of the next visual row instead,
-        // adding an empty display line when there isn't one already.
-        if cursor_col >= w {
-            cursor_row += 1;
-            cursor_col = 0;
-            if cursor_row >= display_lines.len() {
-                display_lines.push(String::new());
-            }
-        }
-
-        (display_lines, cursor_row, cursor_col)
     }
 }
 
@@ -342,37 +281,80 @@ impl Widget for Editor {
             return vec![String::new()];
         }
 
-        let (mut lines, crow, ccol) = self.layout(width);
+        let cursor_glyph = format!("{CURSOR_MARKER}\x1b[7m \x1b[27m");
+        let mut display: Vec<String> = Vec::new();
 
-        // Only the focused editor paints a cursor. Both the visible
-        // reverse-video block and the zero-width CURSOR_MARKER come from the
-        // same (crow, ccol) computed by a single `layout` call, so the
-        // painted cursor and the hardware cursor cannot end up on different
-        // cells.
-        if self.focused {
-            if let Some(line) = lines.get_mut(crow) {
-                let chars: Vec<char> = line.chars().collect();
-                if ccol < chars.len() {
-                    let before: String = chars[..ccol].iter().collect();
-                    let cursor_ch = chars[ccol];
-                    let after: String = chars[ccol + 1..].iter().collect();
-                    *line = format!(
-                        "{before}{CURSOR_MARKER}\x1b[7m{cursor_ch}\x1b[27m{after}"
-                    );
+        for (li, line) in self.lines.iter().enumerate() {
+            let breaks = line_breaks(line, width);
+
+            for (si, &seg_start) in breaks.iter().enumerate() {
+                let seg_end = breaks.get(si + 1).copied().unwrap_or(line.len());
+                let is_last_seg = si + 1 == breaks.len();
+
+                // Trim trailing spaces at a wrap point so the next segment
+                // starts cleanly after the break (matches `line_breaks`).
+                let mut content_end = seg_end;
+                if !is_last_seg {
+                    while content_end > seg_start && line[content_end - 1] == ' ' {
+                        content_end -= 1;
+                    }
+                }
+                let seg_chars = &line[seg_start..content_end];
+
+                // Does the cursor live on this segment? It does if it's on
+                // the cursor line and either falls strictly inside the
+                // segment or sits exactly at the end of the *last* segment
+                // of the line.
+                let on_cursor = self.focused
+                    && li == self.row
+                    && self.col >= seg_start
+                    && (self.col < seg_end || (self.col == seg_end && is_last_seg));
+
+                if !on_cursor {
+                    display.push(seg_chars.iter().collect());
+                    continue;
+                }
+
+                let local = self.col - seg_start;
+                let visible_len = content_end - seg_start;
+
+                if local < visible_len {
+                    // Cursor on a visible char — replace it with marker +
+                    // reverse-video.
+                    let before: String = seg_chars[..local].iter().collect();
+                    let after: String = seg_chars[local + 1..].iter().collect();
+                    display.push(format!(
+                        "{before}{CURSOR_MARKER}\x1b[7m{}\x1b[27m{after}",
+                        seg_chars[local]
+                    ));
+                } else if local >= width {
+                    // Cursor would land at column == width of a fully-filled
+                    // segment. Push the segment unchanged and emit a fresh
+                    // visual row carrying just the cursor, so the caret
+                    // never lands on whatever sits to the right of the
+                    // editor (e.g. a block border).
+                    display.push(seg_chars.iter().collect());
+                    display.push(cursor_glyph.clone());
                 } else {
-                    line.push_str(CURSOR_MARKER);
-                    line.push_str("\x1b[7m \x1b[27m");
+                    // Cursor at end of segment, fits within width — append.
+                    let mut segment: String = seg_chars.iter().collect();
+                    segment.push_str(&cursor_glyph);
+                    display.push(segment);
                 }
             }
         }
 
-        lines
+        if display.is_empty() {
+            display.push(String::new());
+        }
+        display
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::extract_cursor;
 
     fn editor() -> Editor {
         Editor::new()
@@ -380,99 +362,58 @@ mod tests {
 
     fn type_str(p: &mut Editor, s: &str) {
         for c in s.chars() {
-            p.buf.insert(p.cursor, c);
-            p.cursor += 1;
+            if c == '\n' {
+                p.insert_newline();
+            } else {
+                p.lines[p.row].insert(p.col, c);
+                p.col += 1;
+            }
         }
     }
+
+    /// Render with the cursor disabled, so callers can compare against
+    /// plain text without dealing with the marker / reverse-video bytes.
+    fn render_plain(p: &mut Editor, width: usize) -> Vec<String> {
+        let was_focused = p.focused;
+        p.focused = false;
+        let lines = p.render(width);
+        p.focused = was_focused;
+        lines
+    }
+
+    /// Render with the cursor enabled and extract its (row, col) via the
+    /// same path the screen uses.
+    fn render_with_cursor(p: &mut Editor, width: usize) -> (Vec<String>, usize, usize) {
+        p.focused = true;
+        let mut lines = p.render(width);
+        let (row, col) = extract_cursor(&mut lines).expect("cursor marker present");
+        (lines, row, col)
+    }
+
+    // ── Render shape ────────────────────────────────────────────────
 
     #[test]
     fn single_line_render() {
         let mut p = editor();
         type_str(&mut p, "hello");
-        let lines = p.render(80);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("hello"));
+        let lines = render_plain(&mut p, 80);
+        assert_eq!(lines, vec!["hello".to_string()]);
     }
 
     #[test]
     fn multiline_render() {
         let mut p = editor();
         type_str(&mut p, "aaa\nbbb");
-        let lines = p.render(80);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("aaa"));
-        assert!(lines[1].starts_with("bbb"));
+        let lines = render_plain(&mut p, 80);
+        assert_eq!(lines, vec!["aaa".to_string(), "bbb".to_string()]);
     }
 
     #[test]
     fn word_wrapping() {
         let mut p = editor();
         type_str(&mut p, "aaaa bbbb");
-        // Width 6 => "aaaa" fits, "bbbb" wraps
-        let lines = p.render(6);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("aaaa"));
-        assert!(lines[1].starts_with("bbbb"));
-    }
-
-    #[test]
-    fn cursor_position_end() {
-        let mut p = editor();
-        type_str(&mut p, "hi");
-        let (_, row, col) = p.layout(80);
-        assert_eq!(row, 0);
-        assert_eq!(col, 2);
-    }
-
-    #[test]
-    fn cursor_position_second_line() {
-        let mut p = editor();
-        type_str(&mut p, "aaa\nb");
-        let (_, row, col) = p.layout(80);
-        assert_eq!(row, 1);
-        assert_eq!(col, 1);
-    }
-
-    #[test]
-    fn line_navigation() {
-        let mut p = editor();
-        type_str(&mut p, "abcd\nef");
-        assert_eq!(p.cursor, 7);
-        p.move_vertical(-1);
-        assert_eq!(p.cursor, 2);
-        p.move_vertical(1);
-        assert_eq!(p.cursor, 7);
-    }
-
-    #[test]
-    fn line_navigation_clamps_column() {
-        let mut p = editor();
-        type_str(&mut p, "abcdef\nhi");
-        p.move_vertical(-1);
-        assert_eq!(p.cursor, 2);
-        p.cursor = 6;
-        p.move_vertical(1);
-        assert_eq!(p.cursor, 9);
-    }
-
-    #[test]
-    fn home_end_multiline() {
-        let mut p = editor();
-        type_str(&mut p, "aaa\nbbb");
-        let start = p.line_start(p.cursor);
-        assert_eq!(start, 4);
-        let end = p.line_end(p.cursor);
-        assert_eq!(end, 7);
-    }
-
-    #[test]
-    fn ctrl_u_multiline() {
-        let mut p = editor();
-        type_str(&mut p, "aaa\nbbb");
-        let start = p.line_start(p.cursor);
-        p.buf.drain(start..p.cursor);
-        p.cursor = start;
-        assert_eq!(p.text(), "aaa\n");
+        let lines = render_plain(&mut p, 6);
+        assert_eq!(lines, vec!["aaaa".to_string(), "bbbb".to_string()]);
     }
 
     #[test]
@@ -480,55 +421,79 @@ mod tests {
         let mut p = editor();
         let lines = p.render(80);
         assert_eq!(lines.len(), 1);
-        // Empty line with just a cursor
+        // Empty line with just a cursor.
         assert!(lines[0].contains("\x1b[7m"));
+        assert!(lines[0].contains(CURSOR_MARKER));
+    }
+
+    #[test]
+    fn hard_break_long_word() {
+        let mut p = editor();
+        type_str(&mut p, "abcdefghij");
+        // Place the cursor at the start so we don't add a trailing visual row.
+        p.col = 0;
+        let lines = render_plain(&mut p, 5);
+        assert_eq!(lines, vec!["abcde".to_string(), "fghij".to_string()]);
+    }
+
+    // ── Cursor position via render+extract ──────────────────────────
+
+    #[test]
+    fn cursor_position_end() {
+        let mut p = editor();
+        type_str(&mut p, "hi");
+        let (_, row, col) = render_with_cursor(&mut p, 80);
+        assert_eq!((row, col), (0, 2));
+    }
+
+    #[test]
+    fn cursor_position_second_line() {
+        let mut p = editor();
+        type_str(&mut p, "aaa\nb");
+        let (_, row, col) = render_with_cursor(&mut p, 80);
+        assert_eq!((row, col), (1, 1));
     }
 
     #[test]
     fn cursor_after_trailing_space() {
         let mut p = editor();
         type_str(&mut p, "hello ");
-        let (_, row, col) = p.layout(80);
-        assert_eq!(row, 0);
-        assert_eq!(col, 6);
+        let (_, row, col) = render_with_cursor(&mut p, 80);
+        assert_eq!((row, col), (0, 6));
     }
 
     #[test]
     fn cursor_after_multiple_spaces() {
         let mut p = editor();
         type_str(&mut p, "hi   ");
-        let (_, row, col) = p.layout(80);
-        assert_eq!(row, 0);
-        assert_eq!(col, 5);
+        let (_, row, col) = render_with_cursor(&mut p, 80);
+        assert_eq!((row, col), (0, 5));
     }
 
     #[test]
     fn cursor_at_end_of_wrapped_line() {
         let mut p = editor();
         type_str(&mut p, "hello world");
-        let (_, row, col) = p.layout(8);
-        assert_eq!(row, 1);
-        assert_eq!(col, 5);
+        let (_, row, col) = render_with_cursor(&mut p, 8);
+        assert_eq!((row, col), (1, 5));
     }
 
     #[test]
     fn cursor_on_space_at_wrap_point() {
         let mut p = editor();
         type_str(&mut p, "hello world");
-        p.cursor = 5; // on the space
-        let (_, row, col) = p.layout(8);
-        assert_eq!(row, 0);
-        assert_eq!(col, 5);
+        p.col = 5; // on the space
+        let (_, row, col) = render_with_cursor(&mut p, 8);
+        assert_eq!((row, col), (0, 5));
     }
 
     #[test]
     fn cursor_on_first_char_of_wrapped_line() {
         let mut p = editor();
         type_str(&mut p, "hello world");
-        p.cursor = 6; // on 'w'
-        let (_, row, col) = p.layout(8);
-        assert_eq!(row, 1);
-        assert_eq!(col, 0);
+        p.col = 6; // on 'w'
+        let (_, row, col) = render_with_cursor(&mut p, 8);
+        assert_eq!((row, col), (1, 0));
     }
 
     #[test]
@@ -538,8 +503,9 @@ mod tests {
         // right border of an enclosing block lives.
         let mut p = editor();
         type_str(&mut p, "abcde");
-        let (lines, row, col) = p.layout(5);
-        assert_eq!(lines, vec!["abcde".to_string(), String::new()]);
+        let (lines, row, col) = render_with_cursor(&mut p, 5);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "abcde");
         assert_eq!((row, col), (1, 0));
     }
 
@@ -547,11 +513,10 @@ mod tests {
     fn cursor_wraps_at_exact_width_after_newline() {
         let mut p = editor();
         type_str(&mut p, "ab\ncdefg");
-        let (lines, row, col) = p.layout(5);
-        assert_eq!(
-            lines,
-            vec!["ab".to_string(), "cdefg".to_string(), String::new()]
-        );
+        let (lines, row, col) = render_with_cursor(&mut p, 5);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "ab");
+        assert_eq!(lines[1], "cdefg");
         assert_eq!((row, col), (2, 0));
     }
 
@@ -559,23 +524,66 @@ mod tests {
     fn cursor_just_below_width_does_not_wrap() {
         let mut p = editor();
         type_str(&mut p, "abcd");
-        let (lines, row, col) = p.layout(5);
-        assert_eq!(lines, vec!["abcd".to_string()]);
+        let (lines, row, col) = render_with_cursor(&mut p, 5);
+        assert_eq!(lines.len(), 1);
         assert_eq!((row, col), (0, 4));
     }
 
+    // ── Edit operations driven through fields ──────────────────────
+
     #[test]
-    fn hard_break_long_word() {
+    fn line_navigation() {
         let mut p = editor();
-        type_str(&mut p, "abcdefghij");
-        // Put the cursor at the start so the "wrap cursor at full width"
-        // behaviour doesn't add a trailing empty visual line.
-        p.cursor = 0;
-        let (lines, _, _) = p.layout(5);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "abcde");
-        assert_eq!(lines[1], "fghij");
+        type_str(&mut p, "abcd\nef");
+        assert_eq!((p.row, p.col), (1, 2));
+        // Up: back into "abcd" at column 2.
+        p.row -= 1;
+        p.col = p.col.min(p.lines[p.row].len());
+        assert_eq!((p.row, p.col), (0, 2));
+        // Down: forward into "ef" at column 2.
+        p.row += 1;
+        p.col = p.col.min(p.lines[p.row].len());
+        assert_eq!((p.row, p.col), (1, 2));
     }
+
+    #[test]
+    fn line_navigation_clamps_column() {
+        let mut p = editor();
+        type_str(&mut p, "abcdef\nhi");
+        // Cursor on line 1, col 2 (end of "hi"). Up should clamp to col 2.
+        p.row -= 1;
+        p.col = p.col.min(p.lines[p.row].len());
+        assert_eq!((p.row, p.col), (0, 2));
+        // Move to col 6 (end of "abcdef"); Down should clamp to col 2 (end of "hi").
+        p.col = 6;
+        p.row += 1;
+        p.col = p.col.min(p.lines[p.row].len());
+        assert_eq!((p.row, p.col), (1, 2));
+    }
+
+    #[test]
+    fn home_end_multiline() {
+        let mut p = editor();
+        type_str(&mut p, "aaa\nbbb");
+        // We're on line 1; Home → col 0, End → col 3.
+        p.col = 0;
+        assert_eq!((p.row, p.col), (1, 0));
+        p.col = p.lines[p.row].len();
+        assert_eq!((p.row, p.col), (1, 3));
+    }
+
+    #[test]
+    fn ctrl_u_drains_to_line_start() {
+        let mut p = editor();
+        type_str(&mut p, "aaa\nbbb");
+        // On line 1 at col 3; Ctrl+U should leave the previous line untouched
+        // and clear the current line, leaving the buffer at "aaa\n".
+        p.lines[p.row].drain(..p.col);
+        p.col = 0;
+        assert_eq!(p.text(), "aaa\n");
+    }
+
+    // ── line_breaks helper ─────────────────────────────────────────
 
     #[test]
     fn line_breaks_basic() {

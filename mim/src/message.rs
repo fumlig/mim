@@ -2,7 +2,7 @@ use agent::provider::ResponseEvent;
 
 use crate::block::{Block, VerticalBorder};
 use crate::format::wrap_text;
-use crate::widget::{Widget, WidgetExt};
+use crate::widget::Widget;
 
 pub enum Role {
     User,

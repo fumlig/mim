@@ -8,6 +8,7 @@ my personal agent harness
 - process events as stream
 - tool executables
 - extensive testing
+- line numbers should not count wrapped words
 
 ## notes
 

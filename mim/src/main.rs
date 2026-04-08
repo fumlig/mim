@@ -4,7 +4,6 @@ mod capture;
 mod context;
 mod editor;
 mod format;
-mod layout;
 mod message;
 mod screen;
 #[cfg(feature = "capture")]
