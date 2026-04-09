@@ -1,10 +1,10 @@
 use agent::provider::ResponseEvent;
 
-use crate::block::{Block, VerticalBorder};
-use crate::format::wrap_text;
-use crate::widget::Widget;
+use super::block::{Block, VerticalBorder};
+use super::paragraph::Paragraph;
+use super::Widget;
 
-pub enum Role {
+enum Role {
     User,
     Assistant,
 }
@@ -67,21 +67,6 @@ impl Message {
     }
 }
 
-/// Helper widget that word-wraps pre-existing text.
-struct WrappedText<'a> {
-    text: &'a str,
-}
-
-impl Widget for WrappedText<'_> {
-    fn render(&mut self, width: usize) -> Vec<String> {
-        let w = width as usize;
-        if w == 0 {
-            return vec![];
-        }
-        wrap_text(self.text, w, "-")
-    }
-}
-
 impl Widget for Message {
     fn render(&mut self, width: usize) -> Vec<String> {
         if self.text.is_empty() {
@@ -89,7 +74,7 @@ impl Widget for Message {
         }
 
         let prefix = self.prefix();
-        let mut content = WrappedText { text: &self.text };
+        let mut content = Paragraph::new(&self.text);
         let mut border = Block::new(&mut content).left(VerticalBorder::repeat(prefix.to_string()));
         border.render(width)
     }

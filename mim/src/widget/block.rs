@@ -1,5 +1,5 @@
+use super::Widget;
 use crate::format;
-use crate::widget::Widget;
 use std::iter;
 
 pub struct HorizontalBorder {
@@ -186,15 +186,14 @@ impl<'a, W: Widget> Widget for Block<'a, W> {
 
         lines
     }
-
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::editor::Editor;
+    use super::super::WidgetExt;
     use super::*;
-    use crate::editor::Editor;
     use crate::format::extract_cursor;
-    use crate::widget::WidgetExt;
 
     fn type_into(editor: &mut Editor, s: &str) {
         for c in s.chars() {

@@ -1,14 +1,10 @@
-mod block;
 #[cfg(feature = "capture")]
 mod capture;
 mod context;
-mod editor;
 mod format;
-mod message;
 mod screen;
 #[cfg(feature = "capture")]
 mod silero;
-mod spinner;
 mod tool;
 #[cfg(feature = "capture")]
 mod voice;
@@ -18,8 +14,8 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, ValueEnum};
 use context::Context;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use std::{io::ErrorKind, path::PathBuf};
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use std::path::PathBuf;
+use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
@@ -30,13 +26,9 @@ use agent::{
 };
 use tokio::sync::mpsc;
 
-use crate::message::Message;
-use crate::screen::{Screen, ScreenEvent};
-use crate::spinner::Spinner;
-use crate::widget::WidgetExt;
 use crate::{
-    editor::{Editor, EditorAction},
-    screen::EventStream,
+    screen::{EventStream, Screen, ScreenEvent},
+    widget::{Block, Editor, EditorAction, Message, Paragraph, Spinner, Widget, WidgetExt},
 };
 
 #[derive(Parser, Debug)]
@@ -243,16 +235,22 @@ async fn run(args: Args) -> Result<()> {
             frame.add(&mut state.spinner);
         }
 
-        // The editor is always focused; it embeds CURSOR_MARKER in its
-        // own rendered output, and Screen::end extracts it.
-        frame.add(
-            &mut state
-                .prompt
-                .pad(0, 0, 0, 1)
-                .line_numbers(2)
-                .ascii()
-                .pad(1, 0, 0, 0),
-        );
+        match state.mode {
+            Mode::Text => {
+                frame.add(
+                    &mut state
+                        .prompt
+                        .pad(0, 0, 0, 1)
+                        .line_numbers(2)
+                        .ascii()
+                        .pad(1, 0, 0, 0),
+                );
+            }
+
+            Mode::Audio => {
+                frame.add(&mut Paragraph::new("audio"));
+            }
+        };
 
         state.screen.end(frame)?;
 
