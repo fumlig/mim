@@ -15,10 +15,11 @@ mod voice;
 mod widget;
 
 use anyhow::{anyhow, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use context::Context;
-use futures::StreamExt;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use std::{io::ErrorKind, path::PathBuf};
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
@@ -29,22 +30,29 @@ use agent::{
 };
 use tokio::sync::mpsc;
 
-use crate::editor::{Editor, EditorAction};
 use crate::message::Message;
-use crate::screen::Screen;
+use crate::screen::{Screen, ScreenEvent};
 use crate::spinner::Spinner;
 use crate::widget::WidgetExt;
+use crate::{
+    editor::{Editor, EditorAction},
+    screen::EventStream,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "mim", version)]
 struct Args {
-    /// Model to use
-    #[arg(short, long, env = "MIM_MODEL")]
-    model: String,
+    /// Prompt mode
+    #[arg(short, long, env = "MIM_MODE", default_value = "text")]
+    mode: Mode,
 
     /// Root .mim directory. Defaults to nearest .mim in an ancestor, or ./.mim
     #[arg(short, long, env = "MIM_PATH")]
     path: Option<PathBuf>,
+
+    /// Model to use
+    #[arg(long, env = "MIM_MODEL")]
+    model: String,
 
     #[cfg(feature = "capture")]
     #[command(flatten)]
@@ -63,11 +71,11 @@ async fn main() -> Result<()> {
     run(args).await
 }
 
-enum AgentOutput {
+enum AgentEvent {
     /// The agent is about to process this input.
     Starting { text: String, cancel: Cancel },
     /// A streaming event from the agent.
-    Event(ResponseEvent),
+    Response(ResponseEvent),
     /// The current turn completed.
     TurnDone,
     /// An error occurred during the turn.
@@ -77,7 +85,7 @@ enum AgentOutput {
 async fn agent_task<P>(
     mut agent: Agent<P>,
     mut input_rx: mpsc::Receiver<String>,
-    output_tx: mpsc::UnboundedSender<AgentOutput>,
+    output_tx: mpsc::UnboundedSender<AgentEvent>,
 ) where
     P: Provider + Send + 'static,
     P::Error: std::fmt::Display + Send + Sync + 'static,
@@ -85,7 +93,7 @@ async fn agent_task<P>(
     while let Some(text) = input_rx.recv().await {
         let cancel = Cancel::new();
         if output_tx
-            .send(AgentOutput::Starting {
+            .send(AgentEvent::Starting {
                 text: text.clone(),
                 cancel: cancel.clone(),
             })
@@ -97,13 +105,13 @@ async fn agent_task<P>(
         let tx = output_tx.clone();
         let result = agent
             .run(&text, cancel, move |event| {
-                let _ = tx.send(AgentOutput::Event(event));
+                let _ = tx.send(AgentEvent::Response(event));
             })
             .await;
 
         let msg = match result {
-            Ok(()) => AgentOutput::TurnDone,
-            Err(e) => AgentOutput::Error(e.to_string()),
+            Ok(()) => AgentEvent::TurnDone,
+            Err(e) => AgentEvent::Error(e.to_string()),
         };
         if output_tx.send(msg).is_err() {
             break;
@@ -111,15 +119,37 @@ async fn agent_task<P>(
     }
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+#[clap(rename_all = "snake_case")]
 pub enum Mode {
+    /// Text mode
     Text,
+    /// Audio mode
     Audio,
 }
 
-struct State<P: Provider> {
+impl Mode {
+    pub fn next(&self) -> Self {
+        let all = Mode::value_variants();
+        let i = all
+            .iter()
+            .position(|m| std::mem::discriminant(m) == std::mem::discriminant(self))
+            .unwrap();
+        all[(i + 1) % all.len()].clone()
+    }
+}
+
+struct State {
     mode: Mode,
     screen: Screen,
-    agent: Agent<P>,
+    events: EventStream,
+    input_tx: Sender<String>,
+    output_rx: UnboundedReceiver<AgentEvent>,
+
+    messages: Vec<Message>,
+    spinner: Spinner,
+    cancel: Option<Cancel>,
+    prompt: Editor,
 }
 
 async fn run(args: Args) -> Result<()> {
@@ -155,93 +185,142 @@ async fn run(args: Args) -> Result<()> {
     }
     */
 
-    let ctx = Context::new(args.path)?;
-    debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
+    let mut state = {
+        let ctx = Context::new(args.path)?;
+        debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
 
-    let provider = OpenAIProvider::new();
-    let tools = tool::make_tools()?;
-    let session = Session::open(ctx.session_path)?;
-    let agent = Agent::new(provider, args.model, tools, session);
+        let agent = {
+            let provider = OpenAIProvider::new();
+            let tools = tool::make_tools()?;
+            let session = Session::open(ctx.session_path)?;
 
-    let (input_tx, input_rx) = mpsc::channel::<String>(16);
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<AgentOutput>();
+            Agent::new(provider, args.model, tools, session)
+        };
 
-    tokio::spawn(agent_task(agent, input_rx, output_tx));
+        let (input_tx, output_rx) = {
+            let (input_tx, input_rx) = mpsc::channel::<String>(16);
+            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
-    let mut screen = Screen::new()?;
-    let mut prompt = Editor::new();
-    let mut blocks: Vec<Message> = Vec::new();
-    let mut current_cancel: Option<Cancel> = None;
-    let mut spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
+            tokio::spawn(agent_task(agent, input_rx, output_tx));
 
-    let mut events = screen.take_events().ok_or(anyhow!("no event stream"))?;
+            (input_tx, output_rx)
+        };
+
+        let mode = args.mode;
+
+        let mut screen = Screen::new()?;
+        let events = screen.take_events().ok_or(anyhow!("no event stream"))?;
+
+        let prompt = Editor::new();
+        let messages: Vec<Message> = Vec::new();
+        let cancel: Option<Cancel> = None;
+        let spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
+
+        State {
+            mode,
+            screen,
+            events,
+            input_tx,
+            output_rx,
+            messages,
+            spinner,
+            cancel,
+            prompt,
+        }
+    };
+
     loop {
-        let mut frame = screen.begin()?;
-        for (i, block) in blocks.iter_mut().enumerate() {
+        // render
+        let mut frame = state.screen.begin()?;
+        for (i, message) in state.messages.iter_mut().enumerate() {
             if i > 0 {
                 frame.add_line(String::new());
             }
-            frame.add(block);
+            frame.add(message);
         }
 
-        if current_cancel.is_some() {
-            frame.add(&mut spinner);
+        if state.cancel.is_some() {
+            frame.add(&mut state.spinner);
         }
 
         // The editor is always focused; it embeds CURSOR_MARKER in its
         // own rendered output, and Screen::end extracts it.
         frame.add(
-            &mut prompt
+            &mut state
+                .prompt
                 .pad(0, 0, 0, 1)
                 .line_numbers(2)
                 .ascii()
                 .pad(1, 0, 0, 0),
         );
 
-        screen.end(frame)?;
+        state.screen.end(frame)?;
 
+        // events
         tokio::select! {
-            Some(result) = events.next() => {
-                let event = result?;
-                let Some(action) = prompt.handle(event) else {
-                    continue;
-                };
-                match action {
-                    EditorAction::Submit(text) => {
-                        let _ = input_tx.send(text).await;
-                    }
-                    EditorAction::Interrupt => {
-                        if let Some(cancel) = current_cancel.take() {
+            Some(result) = state.events.next(&mut state.screen) => {
+                match result? {
+                    ScreenEvent::Interrupt => {
+                        // Preserve legacy behaviour: while the prompt still
+                        // holds text, Ctrl+C clears it; otherwise it cancels
+                        // any in-flight work or exits the app.
+                        if !state.prompt.is_empty() {
+                            state.prompt.clear();
+                        } else if let Some(cancel) = state.cancel.take() {
                             cancel.cancel();
                         } else {
                             break;
                         }
                     }
-                    EditorAction::Suspend => screen.suspend()?,
-                    EditorAction::Quit => screen.quit()?,
-                    EditorAction::Eof => break,
-                }
-            }
-            Some(output) = output_rx.recv() => {
-                match output {
-                    AgentOutput::Starting { text, cancel } => {
-                        blocks.push(Message::user(&text));
-                        blocks.push(Message::assistant());
-                        current_cancel = Some(cancel);
+                    ScreenEvent::Suspend => {
+                        continue;
                     }
-                    AgentOutput::Event(event) => {
-                        spinner.step();
-                        if let Some(block) = blocks.last_mut() {
-                            block.push_event(&event);
+                    ScreenEvent::Quit => {
+                        break;
+                    }
+                    ScreenEvent::Event(Event::Key(KeyEvent {
+                        code: KeyCode::Tab,
+                        kind: KeyEventKind::Press,
+                        ..
+                    })) => {
+                        state.mode = state.mode.next();
+                        continue;
+                    }
+                    ScreenEvent::Event(event) => {
+                        // Pass other events to the prompt. In audio mode we
+                        // mutate the editor and submit manually from here.
+                        let Some(action) = state.prompt.handle(event) else {
+                            continue;
+                        };
+                        match action {
+                            EditorAction::Submit(text) => {
+                                let _ = state.input_tx.send(text).await;
+                            }
+                            EditorAction::Eof => break,
                         }
                     }
-                    AgentOutput::TurnDone => {
-                        current_cancel = None;
+                }
+            }
+            Some(output) = state.output_rx.recv() => {
+                match output {
+                    AgentEvent::Starting { text, cancel } => {
+                        state.messages.push(Message::user(&text));
+                        state.messages.push(Message::assistant());
+                        state.cancel = Some(cancel);
                     }
-                    AgentOutput::Error(e) => {
-                        current_cancel = None;
-                        if let Some(block) = blocks.last_mut() {
-                            block.push_error(&e);
+                    AgentEvent::Response(event) => {
+                        state.spinner.step();
+                        if let Some(message) = state.messages.last_mut() {
+                            message.push_event(&event);
+                        }
+                    }
+                    AgentEvent::TurnDone => {
+                        state.cancel = None;
+                    }
+                    AgentEvent::Error(e) => {
+                        state.cancel = None;
+                        if let Some(message) = state.messages.last_mut() {
+                            message.push_error(&e);
                         }
                     }
                 }

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crossterm::{
     cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show},
-    event::{Event, EventStream},
+    event::{Event, EventStream as CtEventStream, KeyCode, KeyEventKind, KeyModifiers},
     queue,
     style::{Attribute, SetAttribute},
     terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
@@ -68,8 +68,101 @@ pub struct Screen {
     cursor_row: usize,
     /// Whether raw mode is active.
     active: bool,
-    /// Async stream of crossterm events.
+    /// Async stream of terminal events, wrapping crossterm's stream and
+    /// intercepting signal-sending control keys.
     events: Option<EventStream>,
+}
+
+/// High-level terminal event emitted by [`EventStream`].
+///
+/// Signal-producing control keys (`Ctrl+C`, `Ctrl+Z`, `Ctrl+\`) are parsed
+/// out of the raw crossterm event stream. `Ctrl+Z` and `Ctrl+\` are fully
+/// handled by [`EventStream::next`] before the corresponding variant is
+/// returned to the caller; `Ctrl+C` is left for the caller to interpret,
+/// since its meaning depends on whether work is in flight and whether the
+/// prompt buffer is empty.
+pub enum ScreenEvent {
+    /// Ctrl+C pressed.
+    Interrupt,
+    /// Ctrl+Z pressed. [`Screen::suspend`] has already been invoked.
+    Suspend,
+    /// Ctrl+\ pressed. [`Screen::quit`] has already been invoked.
+    Quit,
+    /// Any other terminal event; forward to widgets as-is.
+    Event(Event),
+}
+
+/// Async stream of [`ScreenEvent`]s. Wraps crossterm's event stream and
+/// transparently handles signal-sending control keys.
+pub struct EventStream {
+    inner: CtEventStream,
+}
+
+enum Signal {
+    Interrupt,
+    Suspend,
+    Quit,
+}
+
+fn classify_signal(event: &Event) -> Option<Signal> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('c') => Some(Signal::Interrupt),
+        KeyCode::Char('z') => Some(Signal::Suspend),
+        KeyCode::Char('\\') => Some(Signal::Quit),
+        _ => None,
+    }
+}
+
+impl EventStream {
+    fn new() -> Self {
+        Self {
+            inner: CtEventStream::new(),
+        }
+    }
+
+    /// Await the next event.
+    ///
+    /// `Ctrl+Z` and `Ctrl+\` are fully handled inside this method: the
+    /// screen is suspended or quit *before* the corresponding
+    /// [`ScreenEvent`] is returned, so the caller only needs to react (for
+    /// example by breaking out of its render loop on `Quit`). `Ctrl+C` is
+    /// surfaced as [`ScreenEvent::Interrupt`] without any side effects —
+    /// the caller decides whether to cancel work, clear the prompt, or
+    /// exit.
+    pub async fn next(&mut self, screen: &mut Screen) -> Option<io::Result<ScreenEvent>> {
+        let event = match self.inner.next().await? {
+            Ok(event) => event,
+            Err(err) => return Some(Err(err)),
+        };
+
+        let mapped = match classify_signal(&event) {
+            Some(Signal::Interrupt) => ScreenEvent::Interrupt,
+            Some(Signal::Suspend) => {
+                if let Err(err) = screen.suspend() {
+                    return Some(Err(err));
+                }
+                ScreenEvent::Suspend
+            }
+            Some(Signal::Quit) => {
+                if let Err(err) = screen.quit() {
+                    return Some(Err(err));
+                }
+                ScreenEvent::Quit
+            }
+            None => ScreenEvent::Event(event),
+        };
+
+        Some(Ok(mapped))
+    }
 }
 
 impl Screen {

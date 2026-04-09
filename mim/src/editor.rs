@@ -4,17 +4,16 @@ use crate::format::CURSOR_MARKER;
 use crate::widget::Widget;
 
 /// Action returned by [`Editor::handle`].
+///
+/// The editor only parses editing-related keyboard shortcuts. Signal-
+/// sending control keys (`Ctrl+C`, `Ctrl+Z`, `Ctrl+\`) are intercepted
+/// upstream by [`crate::screen::EventStream`] and never reach this
+/// handler.
 pub enum EditorAction {
     /// User pressed Enter — contains the submitted text.
     Submit(String),
     /// Ctrl+D on empty editor — end of input.
     Eof,
-    /// Ctrl+C — interrupt.
-    Interrupt,
-    /// Ctrl+Z — suspend process.
-    Suspend,
-    /// Ctrl+\ — quit with core dump.
-    Quit,
 }
 
 /// Multiline text editor widget with word wrapping.
@@ -94,18 +93,6 @@ impl Editor {
                 if self.is_empty() {
                     return Some(EditorAction::Eof);
                 }
-            }
-            KeyCode::Char('c') if ctrl => {
-                if self.is_empty() {
-                    return Some(EditorAction::Interrupt);
-                }
-                self.clear();
-            }
-            KeyCode::Char('z') if ctrl => {
-                return Some(EditorAction::Suspend);
-            }
-            KeyCode::Char('\\') if ctrl => {
-                return Some(EditorAction::Quit);
             }
 
             // Submit
