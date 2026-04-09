@@ -151,9 +151,8 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     pub fn new() -> Self {
-        let config =
-            OpenAIConfig::new().with_api_key(std::env::var("OPENAI_API_KEY").unwrap_or_default());
-        let client = Client::with_config(config);
+        // Client reads OPENAI_API_KEY and OPENAI_BASE_URL
+        let client = Client::new();
         Self { client }
     }
 }
@@ -168,105 +167,105 @@ impl Provider for OpenAIProvider {
         tools: impl IntoIterator<Item = &'a Tool> + Send + 'a,
     ) -> Pin<Box<dyn Future<Output = ResponseResult<Self::Error>> + Send + 'a>> {
         Box::pin(async move {
-        let input = {
-            let items = history.iter().map(InputItem::from).collect();
-            InputParam::Items(items)
-        };
-        let tools: Vec<OpenAITool> = tools.into_iter().map(|t| t.into()).collect();
+            let input = {
+                let items = history.iter().map(InputItem::from).collect();
+                InputParam::Items(items)
+            };
+            let tools: Vec<OpenAITool> = tools.into_iter().map(|t| t.into()).collect();
 
-        let mut builder = CreateResponseArgs::default();
-        builder.model(model).stream(true).input(input);
+            let mut builder = CreateResponseArgs::default();
+            builder.model(model).stream(true).input(input);
 
-        if !tools.is_empty() {
-            builder.tools(tools);
-        }
-
-        let request = builder.build()?;
-
-        let stream = self.client.responses().create_stream(request).await?;
-
-        let mapped = stream.filter_map(|result| async {
-            match result {
-                // Reasoning deltas (content = full thinking, summary = condensed)
-                Ok(ResponseStreamEvent::ResponseReasoningTextDelta(e)) => {
-                    Some(Ok(ResponseEvent::ReasoningDelta(e.delta)))
-                }
-                Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(_)) => None,
-
-                // Text output delta
-                Ok(ResponseStreamEvent::ResponseOutputTextDelta(e)) => {
-                    Some(Ok(ResponseEvent::TextDelta(e.delta)))
-                }
-
-                // Completed output items
-                Ok(ResponseStreamEvent::ResponseOutputItemDone(e)) => match e.item {
-                    OutputItem::FunctionCall(fc) => match serde_json::from_str(&fc.arguments) {
-                        Ok(arguments) => Some(Ok(ResponseEvent::ToolCall(entry::ToolCall {
-                            call_id: fc.call_id,
-                            name: fc.name,
-                            arguments,
-                        }))),
-                        Err(err) => Some(Err(OpenAIError::JSONDeserialize(err, fc.arguments))),
-                    },
-                    OutputItem::Reasoning(ref r) => {
-                        let summary = r
-                            .summary
-                            .iter()
-                            .map(|part| match part {
-                                SummaryPart::SummaryText(t) => t.text.clone(),
-                            })
-                            .collect();
-                        let content = r.content.as_ref().map(|parts| {
-                            parts
-                                .iter()
-                                .map(|c| entry::ReasoningContent {
-                                    text: c.text.clone(),
-                                })
-                                .collect()
-                        });
-                        Some(Ok(ResponseEvent::ReasoningDone(entry::Reasoning {
-                            id: r.id.clone(),
-                            summary,
-                            content,
-                            encrypted_content: r.encrypted_content.clone(),
-                        })))
-                    }
-                    OutputItem::Message(ref msg) => {
-                        let content = msg
-                            .content
-                            .iter()
-                            .map(|c| match c {
-                                OutputMessageContent::OutputText(t) => {
-                                    entry::MessageContent::Text {
-                                        text: t.text.clone(),
-                                    }
-                                }
-                                OutputMessageContent::Refusal(r) => {
-                                    entry::MessageContent::Refusal {
-                                        text: r.refusal.clone(),
-                                    }
-                                }
-                            })
-                            .collect();
-                        Some(Ok(ResponseEvent::TextDone(entry::Message {
-                            role: entry::Role::Assistant,
-                            content,
-                        })))
-                    }
-                    _ => None,
-                },
-
-                // Ignore everything else
-                Ok(event) => {
-                    debug!(r#type = ?event.event_type(), "ignoring event");
-                    None
-                }
-                Err(err) => Some(Err(err)),
+            if !tools.is_empty() {
+                builder.tools(tools);
             }
-        });
 
-        let stream: super::ResponseStream<Self::Error> = Box::pin(mapped);
-        Ok(stream)
+            let request = builder.build()?;
+
+            let stream = self.client.responses().create_stream(request).await?;
+
+            let mapped = stream.filter_map(|result| async {
+                match result {
+                    // Reasoning deltas (content = full thinking, summary = condensed)
+                    Ok(ResponseStreamEvent::ResponseReasoningTextDelta(e)) => {
+                        Some(Ok(ResponseEvent::ReasoningDelta(e.delta)))
+                    }
+                    Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(_)) => None,
+
+                    // Text output delta
+                    Ok(ResponseStreamEvent::ResponseOutputTextDelta(e)) => {
+                        Some(Ok(ResponseEvent::TextDelta(e.delta)))
+                    }
+
+                    // Completed output items
+                    Ok(ResponseStreamEvent::ResponseOutputItemDone(e)) => match e.item {
+                        OutputItem::FunctionCall(fc) => match serde_json::from_str(&fc.arguments) {
+                            Ok(arguments) => Some(Ok(ResponseEvent::ToolCall(entry::ToolCall {
+                                call_id: fc.call_id,
+                                name: fc.name,
+                                arguments,
+                            }))),
+                            Err(err) => Some(Err(OpenAIError::JSONDeserialize(err, fc.arguments))),
+                        },
+                        OutputItem::Reasoning(ref r) => {
+                            let summary = r
+                                .summary
+                                .iter()
+                                .map(|part| match part {
+                                    SummaryPart::SummaryText(t) => t.text.clone(),
+                                })
+                                .collect();
+                            let content = r.content.as_ref().map(|parts| {
+                                parts
+                                    .iter()
+                                    .map(|c| entry::ReasoningContent {
+                                        text: c.text.clone(),
+                                    })
+                                    .collect()
+                            });
+                            Some(Ok(ResponseEvent::ReasoningDone(entry::Reasoning {
+                                id: r.id.clone(),
+                                summary,
+                                content,
+                                encrypted_content: r.encrypted_content.clone(),
+                            })))
+                        }
+                        OutputItem::Message(ref msg) => {
+                            let content = msg
+                                .content
+                                .iter()
+                                .map(|c| match c {
+                                    OutputMessageContent::OutputText(t) => {
+                                        entry::MessageContent::Text {
+                                            text: t.text.clone(),
+                                        }
+                                    }
+                                    OutputMessageContent::Refusal(r) => {
+                                        entry::MessageContent::Refusal {
+                                            text: r.refusal.clone(),
+                                        }
+                                    }
+                                })
+                                .collect();
+                            Some(Ok(ResponseEvent::TextDone(entry::Message {
+                                role: entry::Role::Assistant,
+                                content,
+                            })))
+                        }
+                        _ => None,
+                    },
+
+                    // Ignore everything else
+                    Ok(event) => {
+                        debug!(r#type = ?event.event_type(), "ignoring event");
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                }
+            });
+
+            let stream: super::ResponseStream<Self::Error> = Box::pin(mapped);
+            Ok(stream)
         })
     }
 }
