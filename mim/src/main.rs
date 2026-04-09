@@ -2,6 +2,8 @@
 mod capture;
 mod context;
 mod format;
+mod message;
+mod prompt;
 mod screen;
 #[cfg(feature = "capture")]
 mod silero;
@@ -11,7 +13,7 @@ mod voice;
 mod widget;
 
 use anyhow::{anyhow, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use context::Context;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use std::path::PathBuf;
@@ -27,8 +29,10 @@ use agent::{
 use tokio::sync::mpsc;
 
 use crate::{
+    message::Message,
+    prompt::{EditorAction, Prompt, PromptMode},
     screen::{EventStream, Screen, ScreenEvent},
-    widget::{Block, Editor, EditorAction, Message, Paragraph, Spinner, Widget, WidgetExt},
+    widget::{Spinner, VStack},
 };
 
 #[derive(Parser, Debug)]
@@ -36,7 +40,7 @@ use crate::{
 struct Args {
     /// Prompt mode
     #[arg(short, long, env = "MIM_MODE", default_value = "text")]
-    mode: Mode,
+    mode: PromptMode,
 
     /// Root .mim directory. Defaults to nearest .mim in an ancestor, or ./.mim
     #[arg(short, long, env = "MIM_PATH")]
@@ -111,28 +115,7 @@ async fn agent_task<P>(
     }
 }
 
-#[derive(Debug, Clone, ValueEnum)]
-#[clap(rename_all = "snake_case")]
-pub enum Mode {
-    /// Text mode
-    Text,
-    /// Audio mode
-    Audio,
-}
-
-impl Mode {
-    pub fn next(&self) -> Self {
-        let all = Mode::value_variants();
-        let i = all
-            .iter()
-            .position(|m| std::mem::discriminant(m) == std::mem::discriminant(self))
-            .unwrap();
-        all[(i + 1) % all.len()].clone()
-    }
-}
-
 struct State {
-    mode: Mode,
     screen: Screen,
     events: EventStream,
     input_tx: Sender<String>,
@@ -141,7 +124,7 @@ struct State {
     messages: Vec<Message>,
     spinner: Spinner,
     cancel: Option<Cancel>,
-    prompt: Editor,
+    prompt: Prompt,
 }
 
 async fn run(args: Args) -> Result<()> {
@@ -191,25 +174,22 @@ async fn run(args: Args) -> Result<()> {
 
         let (input_tx, output_rx) = {
             let (input_tx, input_rx) = mpsc::channel::<String>(16);
-            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<AgentEvent>();
+            let (output_tx, output_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
             tokio::spawn(agent_task(agent, input_rx, output_tx));
 
             (input_tx, output_rx)
         };
 
-        let mode = args.mode;
-
         let mut screen = Screen::new()?;
         let events = screen.take_events().ok_or(anyhow!("no event stream"))?;
 
-        let prompt = Editor::new();
+        let prompt = Prompt::new(args.mode);
         let messages: Vec<Message> = Vec::new();
         let cancel: Option<Cancel> = None;
         let spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
 
         State {
-            mode,
             screen,
             events,
             input_tx,
@@ -224,33 +204,18 @@ async fn run(args: Args) -> Result<()> {
     loop {
         // render
         let mut frame = state.screen.begin()?;
-        for (i, message) in state.messages.iter_mut().enumerate() {
-            if i > 0 {
-                frame.add_line(String::new());
-            }
-            frame.add(message);
+
+        let mut messages = VStack::new().spacing(1);
+        for m in &mut state.messages {
+            messages = messages.add(m);
         }
+        frame.add(&mut messages);
 
         if state.cancel.is_some() {
             frame.add(&mut state.spinner);
         }
 
-        match state.mode {
-            Mode::Text => {
-                frame.add(
-                    &mut state
-                        .prompt
-                        .pad(0, 0, 0, 1)
-                        .line_numbers(2)
-                        .ascii()
-                        .pad(1, 0, 0, 0),
-                );
-            }
-
-            Mode::Audio => {
-                frame.add(&mut Paragraph::new("audio"));
-            }
-        };
+        frame.add(&mut state.prompt);
 
         state.screen.end(frame)?;
 
@@ -259,9 +224,6 @@ async fn run(args: Args) -> Result<()> {
             Some(result) = state.events.next(&mut state.screen) => {
                 match result? {
                     ScreenEvent::Interrupt => {
-                        // Preserve legacy behaviour: while the prompt still
-                        // holds text, Ctrl+C clears it; otherwise it cancels
-                        // any in-flight work or exits the app.
                         if !state.prompt.is_empty() {
                             state.prompt.clear();
                         } else if let Some(cancel) = state.cancel.take() {
@@ -281,7 +243,7 @@ async fn run(args: Args) -> Result<()> {
                         kind: KeyEventKind::Press,
                         ..
                     })) => {
-                        state.mode = state.mode.next();
+                        state.prompt.toggle_mode();
                         continue;
                     }
                     ScreenEvent::Event(event) => {

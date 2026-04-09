@@ -10,18 +10,28 @@ pub struct HorizontalBorder {
 }
 
 impl HorizontalBorder {
-    pub fn new(s: String) -> Self {
+    pub fn new(s: impl Into<String>) -> Self {
         Self {
-            s,
+            s: s.into(),
             l: None,
             r: None,
             h: 1,
         }
     }
 
+    /// A single-row horizontal rule made of `-` characters.
+    pub fn line() -> Self {
+        Self::new("-")
+    }
+
     pub fn height(mut self, h: usize) -> Self {
         self.h = h;
         self
+    }
+
+    /// A blank horizontal band of `h` rows.
+    pub fn blank(h: usize) -> Self {
+        Self::pad(h)
     }
 
     pub fn pad(h: usize) -> Self {
@@ -33,13 +43,13 @@ impl HorizontalBorder {
         }
     }
 
-    pub fn left(mut self, l: String) -> Self {
-        self.l = Some(l);
+    pub fn left(mut self, l: impl Into<String>) -> Self {
+        self.l = Some(l.into());
         self
     }
 
-    pub fn right(mut self, r: String) -> Self {
-        self.r = Some(r);
+    pub fn right(mut self, r: impl Into<String>) -> Self {
+        self.r = Some(r.into());
         self
     }
 
@@ -77,10 +87,11 @@ impl VerticalBorder {
     }
 
     pub fn pad(w: usize) -> Self {
-        Self::repeat(" ".to_string().repeat(w))
+        Self::repeat(" ".repeat(w))
     }
 
-    pub fn repeat(s: String) -> Self {
+    pub fn repeat(s: impl Into<String>) -> Self {
+        let s = s.into();
         let w = format::visible_width(&s);
         let s = Box::new(iter::repeat(s));
         Self { s, w }
@@ -100,7 +111,14 @@ impl VerticalBorder {
     }
 }
 
-/// A widget that wraps another widget with optional edges on any side.
+/// A widget that wraps another widget with an optional border on any
+/// side.
+///
+/// A `Block` holds a *single* border per side. To compose multiple bands
+/// — e.g. a horizontal rule with a blank padding row beneath it — wrap
+/// the inner `Block` in another `Block`. Padding is not a special axis,
+/// it's just a border instance ([`HorizontalBorder::blank`] /
+/// [`VerticalBorder::pad`]).
 pub struct Block<'a, W: Widget> {
     child: &'a mut W,
     top: Option<HorizontalBorder>,
@@ -140,6 +158,64 @@ impl<'a, W: Widget> Block<'a, W> {
         self.left = Some(border);
         self
     }
+
+    // ── Padding shortcuts ─────────────────────────────────────────────
+    //
+    // These set the corresponding side to a blank
+    // [`HorizontalBorder::blank`] / [`VerticalBorder::pad`], overwriting
+    // any existing border on that side. If you need both a decorative
+    // border *and* a blank pad on the same side, wrap one `Block` in
+    // another.
+
+    /// Blank top border of `n` rows.
+    pub fn pad_top(self, n: usize) -> Self {
+        self.top(HorizontalBorder::blank(n))
+    }
+
+    /// Blank bottom border of `n` rows.
+    pub fn pad_bottom(self, n: usize) -> Self {
+        self.bottom(HorizontalBorder::blank(n))
+    }
+
+    /// Blank left border of `n` columns.
+    pub fn pad_left(self, n: usize) -> Self {
+        self.left(VerticalBorder::pad(n))
+    }
+
+    /// Blank right border of `n` columns.
+    pub fn pad_right(self, n: usize) -> Self {
+        self.right(VerticalBorder::pad(n))
+    }
+
+    /// Blank left and right borders of `n` columns each.
+    pub fn pad_h(self, n: usize) -> Self {
+        self.pad_left(n).pad_right(n)
+    }
+
+    /// Blank top and bottom borders of `n` rows each.
+    pub fn pad_v(self, n: usize) -> Self {
+        self.pad_top(n).pad_bottom(n)
+    }
+
+    /// Blank borders of `n` on all four sides.
+    pub fn pad_all(self, n: usize) -> Self {
+        self.pad_v(n).pad_h(n)
+    }
+
+    // ── Recipes ─────────────────────────────────────────────────────
+
+    /// Wrap the child in an ASCII `+--+ / |…| / +--+` box.
+    pub fn ascii(self) -> Self {
+        self.top(HorizontalBorder::new("-").left("+").right("+"))
+            .bottom(HorizontalBorder::new("-").left("+").right("+"))
+            .left(VerticalBorder::repeat("|"))
+            .right(VerticalBorder::repeat("|"))
+    }
+
+    /// Attach a left-side line-number gutter of width `w`.
+    pub fn line_numbers(self, w: usize) -> Self {
+        self.left(VerticalBorder::counter(w))
+    }
 }
 
 impl<'a, W: Widget> Widget for Block<'a, W> {
@@ -150,18 +226,13 @@ impl<'a, W: Widget> Widget for Block<'a, W> {
             lines.extend(top.render(width));
         }
 
-        let mut child_width = width;
-
-        if let Some(left) = self.left.as_mut() {
-            child_width -= left.w;
-        }
-
-        if let Some(right) = self.right.as_mut() {
-            child_width -= right.w;
-        }
+        let left_w = self.left.as_ref().map(|b| b.w).unwrap_or(0);
+        let right_w = self.right.as_ref().map(|b| b.w).unwrap_or(0);
+        let child_width = width.saturating_sub(left_w + right_w);
 
         for child_line in self.child.render(child_width) {
-            let mut line = String::with_capacity(child_line.len());
+            let mut line = String::with_capacity(child_line.len() + left_w + right_w);
+
             if let Some(left) = self.left.as_mut() {
                 if let Some(s) = left.s.next() {
                     line.push_str(&s);
@@ -171,8 +242,8 @@ impl<'a, W: Widget> Widget for Block<'a, W> {
             line.push_str(&child_line);
 
             if let Some(right) = self.right.as_mut() {
+                line = format::pad_to_width(&line, width.saturating_sub(right_w), " ");
                 if let Some(s) = right.s.next() {
-                    line = format::pad_to_width(&line, width.saturating_sub(right.w), " ");
                     line.push_str(&s);
                 }
             }
@@ -191,7 +262,6 @@ impl<'a, W: Widget> Widget for Block<'a, W> {
 #[cfg(test)]
 mod tests {
     use super::super::editor::Editor;
-    use super::super::WidgetExt;
     use super::*;
     use crate::format::extract_cursor;
 

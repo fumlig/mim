@@ -45,13 +45,26 @@ use crate::widget::Widget;
 /// lines are concatenated.
 pub struct VStack<'a> {
     children: Vec<&'a mut dyn Widget>,
+    spacing: usize,
 }
 
 impl<'a> VStack<'a> {
     pub fn new() -> Self {
         Self {
             children: Vec::new(),
+            spacing: 0,
         }
+    }
+
+    /// Insert `n` blank rows between consecutive non-empty children.
+    ///
+    /// Children that render to zero lines do not trigger spacing, so
+    /// e.g. an empty [`Message`] does not leave a phantom blank gap.
+    ///
+    /// [`Message`]: crate::widget::Message
+    pub fn spacing(mut self, n: usize) -> Self {
+        self.spacing = n;
+        self
     }
 
     /// Append a child to the stack.
@@ -70,8 +83,19 @@ impl<'a> Default for VStack<'a> {
 impl<'a> Widget for VStack<'a> {
     fn render(&mut self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
+        let mut any_prev = false;
         for child in &mut self.children {
-            lines.extend(child.render(width));
+            let child_lines = child.render(width);
+            if child_lines.is_empty() {
+                continue;
+            }
+            if any_prev {
+                for _ in 0..self.spacing {
+                    lines.push(String::new());
+                }
+            }
+            lines.extend(child_lines);
+            any_prev = true;
         }
         lines
     }
@@ -336,6 +360,42 @@ mod tests {
         let mut lines = v.render(10);
         assert!(lines.is_empty());
         assert_eq!(extract_cursor(&mut lines), None);
+    }
+
+    #[test]
+    fn vstack_spacing_inserts_blank_rows_between_children() {
+        let mut a = Text("a");
+        let mut b = Text("b");
+        let mut c = Text("c");
+        let mut v = VStack::new()
+            .spacing(1)
+            .add(&mut a)
+            .add(&mut b)
+            .add(&mut c);
+        assert_eq!(v.render(10), vec!["a", "", "b", "", "c"]);
+    }
+
+    /// An empty child must not produce a phantom gap when spacing is set.
+    struct Empty;
+    impl Widget for Empty {
+        fn render(&mut self, _w: usize) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn vstack_spacing_skips_empty_children() {
+        let mut a = Text("a");
+        let mut e = Empty;
+        let mut b = Text("b");
+        let mut v = VStack::new()
+            .spacing(1)
+            .add(&mut a)
+            .add(&mut e)
+            .add(&mut b);
+        // The empty child in the middle should not create a double gap
+        // or a trailing blank.
+        assert_eq!(v.render(10), vec!["a", "", "b"]);
     }
 
     // ── HStack ──────────────────────────────────────────────────────

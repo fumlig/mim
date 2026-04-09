@@ -1,14 +1,12 @@
 pub mod block;
 pub mod editor;
 pub mod layout;
-pub mod message;
 pub mod paragraph;
 pub mod spinner;
 
 pub use block::{Block, HorizontalBorder, VerticalBorder};
 pub use editor::{Editor, EditorAction};
 pub use layout::{HStack, VStack};
-pub use message::Message;
 pub use paragraph::Paragraph;
 pub use spinner::Spinner;
 
@@ -27,34 +25,11 @@ pub trait Widget {
     fn render(&mut self, width: usize) -> Vec<String>;
 }
 
+/// Extension helpers for wrapping any widget in a [`Block`].
 pub trait WidgetExt<'a>: Widget + Sized {
-    fn pad(&'a mut self, top: usize, right: usize, bottom: usize, left: usize) -> Block<'a, Self> {
+    /// Wrap `self` in an empty [`Block`] for further configuration.
+    fn block(&'a mut self) -> Block<'a, Self> {
         Block::new(self)
-            .top(HorizontalBorder::pad(top))
-            .right(VerticalBorder::pad(right))
-            .bottom(HorizontalBorder::pad(bottom))
-            .left(VerticalBorder::pad(left))
-    }
-
-    fn ascii(&'a mut self) -> Block<'a, Self> {
-        Block::new(self)
-            .top(
-                HorizontalBorder::new("-".to_string())
-                    .left("+".to_string())
-                    .right("+".to_string()),
-            )
-            .bottom(
-                HorizontalBorder::new("-".to_string())
-                    .left("+".to_string())
-                    .right("+".to_string()),
-            )
-            .left(VerticalBorder::repeat("|".to_string()))
-            .right(VerticalBorder::repeat("|".to_string()))
-        //.bottom(BlockBorder::new("-".to_string(), 1))
-    }
-
-    fn line_numbers(&'a mut self, w: usize) -> Block<'a, Self> {
-        Block::new(self).left(VerticalBorder::counter(w))
     }
 }
 

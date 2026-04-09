@@ -1,8 +1,6 @@
 use agent::provider::ResponseEvent;
 
-use super::block::{Block, VerticalBorder};
-use super::paragraph::Paragraph;
-use super::Widget;
+use crate::widget::{Block, Paragraph, VerticalBorder, Widget};
 
 enum Role {
     User,
