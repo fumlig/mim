@@ -71,7 +71,7 @@ pub struct Compaction {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "entry", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Entry {
     Message(Message),
     ToolCall(ToolCall),

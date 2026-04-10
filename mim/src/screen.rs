@@ -73,6 +73,15 @@ pub struct Screen {
     events: Option<EventStream>,
 }
 
+pub enum Signal {
+    /// Ctrl+C pressed.
+    Interrupt,
+    /// Ctrl+Z pressed. [`Screen::suspend`] has already been invoked.
+    Suspend,
+    /// Ctrl+\ pressed. [`Screen::quit`] has already been invoked.
+    Quit,
+}
+
 /// High-level terminal event emitted by [`EventStream`].
 ///
 /// Signal-producing control keys (`Ctrl+C`, `Ctrl+Z`, `Ctrl+\`) are parsed
@@ -82,13 +91,7 @@ pub struct Screen {
 /// since its meaning depends on whether work is in flight and whether the
 /// prompt buffer is empty.
 pub enum ScreenEvent {
-    /// Ctrl+C pressed.
-    Interrupt,
-    /// Ctrl+Z pressed. [`Screen::suspend`] has already been invoked.
-    Suspend,
-    /// Ctrl+\ pressed. [`Screen::quit`] has already been invoked.
-    Quit,
-    /// Any other terminal event; forward to widgets as-is.
+    Signal(Signal),
     Event(Event),
 }
 
@@ -96,12 +99,6 @@ pub enum ScreenEvent {
 /// transparently handles signal-sending control keys.
 pub struct EventStream {
     inner: CtEventStream,
-}
-
-enum Signal {
-    Interrupt,
-    Suspend,
-    Quit,
 }
 
 fn classify_signal(event: &Event) -> Option<Signal> {
@@ -145,18 +142,17 @@ impl EventStream {
         };
 
         let mapped = match classify_signal(&event) {
-            Some(Signal::Interrupt) => ScreenEvent::Interrupt,
-            Some(Signal::Suspend) => {
-                if let Err(err) = screen.suspend() {
-                    return Some(Err(err));
+            Some(signal) => {
+                let result = match signal {
+                    Signal::Interrupt => Ok(()),
+                    Signal::Suspend => screen.suspend(),
+                    Signal::Quit => screen.quit(),
+                };
+
+                match result {
+                    Ok(()) => ScreenEvent::Signal(signal),
+                    Err(err) => return Some(Err(err)),
                 }
-                ScreenEvent::Suspend
-            }
-            Some(Signal::Quit) => {
-                if let Err(err) = screen.quit() {
-                    return Some(Err(err));
-                }
-                ScreenEvent::Quit
             }
             None => ScreenEvent::Event(event),
         };

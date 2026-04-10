@@ -22,6 +22,7 @@ use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 use agent::{
+    entry::{Entry, MessageContent, Role as EntryRole},
     provider::{openai::OpenAIProvider, ResponseProvider, TranscriptionProvider},
     session::Session,
     Agent, Cancel, Input, OutputEvent,
@@ -31,7 +32,7 @@ use tokio::sync::mpsc;
 use crate::{
     message::Message,
     prompt::{EditorAction, Prompt, PromptMode},
-    screen::{EventStream, Screen, ScreenEvent},
+    screen::{EventStream, Screen, ScreenEvent, Signal},
     widget::{Spinner, VStack},
 };
 
@@ -73,7 +74,7 @@ async fn main() -> Result<()> {
 
 enum AgentEvent {
     /// The agent is about to process this input.
-    Starting { text: String, cancel: Cancel },
+    Starting { cancel: Cancel },
     /// A streaming event from the agent.
     Output(OutputEvent),
     /// The current turn completed.
@@ -84,7 +85,7 @@ enum AgentEvent {
 
 async fn agent_task<R, T>(
     mut agent: Agent<R, T>,
-    mut input_rx: mpsc::Receiver<String>,
+    mut input_rx: mpsc::Receiver<Input>,
     output_tx: mpsc::UnboundedSender<AgentEvent>,
 ) where
     R: ResponseProvider + Send + 'static,
@@ -92,11 +93,10 @@ async fn agent_task<R, T>(
     R::Error: std::fmt::Display + Send + Sync + 'static,
     T::Error: std::fmt::Display + Send + Sync + 'static,
 {
-    while let Some(text) = input_rx.recv().await {
+    while let Some(input) = input_rx.recv().await {
         let cancel = Cancel::new();
         if output_tx
             .send(AgentEvent::Starting {
-                text: text.clone(),
                 cancel: cancel.clone(),
             })
             .is_err()
@@ -106,7 +106,7 @@ async fn agent_task<R, T>(
 
         let tx = output_tx.clone();
         let result = agent
-            .run(Input::Text(text), cancel, move |event| {
+            .run(input, cancel, move |event| {
                 let _ = tx.send(AgentEvent::Output(event));
             })
             .await;
@@ -121,48 +121,75 @@ async fn agent_task<R, T>(
     }
 }
 
+#[cfg(feature = "capture")]
+struct CaptureHandle {
+    _guard: capture::AudioGuard,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "capture")]
+impl Drop for CaptureHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(feature = "capture")]
+fn start_capture(
+    audio_args: &capture::AudioArgs,
+    input_tx: Sender<Input>,
+) -> Result<CaptureHandle> {
+    use crate::capture::AudioCapture;
+    use crate::voice::{VoiceDetector, VoiceEvent};
+    use futures::StreamExt;
+
+    let host = capture::resolve_host(audio_args.audio_host.as_deref())?;
+    let device = capture::resolve_device(&host, audio_args.audio_device.as_deref())?;
+    let (audio, guard) = AudioCapture::new(device)?.stream()?;
+    let detector = VoiceDetector::new(
+        audio_args.vad_threshold,
+        audio_args.vad_silence,
+        &audio_args.vad_model,
+    )?;
+
+    let task = tokio::spawn(async move {
+        let mut events = detector.detect(audio);
+        while let Some(event) = events.next().await {
+            if let VoiceEvent::SpeechEnd(samples) = event {
+                if input_tx.send(Input::Audio(samples)).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(CaptureHandle {
+        _guard: guard,
+        task,
+    })
+}
+
 struct State {
     screen: Screen,
     events: EventStream,
-    input_tx: Sender<String>,
+    input_tx: Sender<Input>,
     output_rx: UnboundedReceiver<AgentEvent>,
 
     messages: Vec<Message>,
+    pending: Option<Message>,
     spinner: Spinner,
     cancel: Option<Cancel>,
     prompt: Prompt,
+
+    #[cfg(feature = "capture")]
+    audio_args: capture::AudioArgs,
+    #[cfg(feature = "capture")]
+    capture: Option<CaptureHandle>,
 }
 
 async fn run(args: Args) -> Result<()> {
     #[cfg(feature = "capture")]
-    {
-        use crate::capture::{self, AudioCapture};
-        use crate::voice::{VoiceDetector, VoiceEvent};
-
-        let host = capture::resolve_host(args.audio.audio_host.as_deref())?;
-        let device = capture::resolve_device(&host, args.audio.audio_device.as_deref())?;
-        use futures::StreamExt;
-
-        let (audio, _guard) = AudioCapture::new(device)?.stream()?;
-        let mut events = VoiceDetector::new(
-            args.audio.vad_threshold,
-            args.audio.vad_silence,
-            &args.audio.vad_model,
-        )?
-        .detect(audio);
-
-        while let Some(event) = events.next().await {
-            match event {
-                VoiceEvent::SpeechStart => println!("[speech start]"),
-                VoiceEvent::SpeechEnd(samples) => {
-                    let ms = samples.len() as u64 * 1000 / 16_000;
-                    println!("[speech end] {ms} ms, {} samples", samples.len());
-                }
-            }
-        }
-
-        println!("ending listen");
-    }
+    let audio_args = args.audio;
 
     let mut state = {
         let ctx = Context::new(args.path)?;
@@ -185,7 +212,7 @@ async fn run(args: Args) -> Result<()> {
         };
 
         let (input_tx, output_rx) = {
-            let (input_tx, input_rx) = mpsc::channel::<String>(16);
+            let (input_tx, input_rx) = mpsc::channel::<Input>(16);
             let (output_tx, output_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
             tokio::spawn(agent_task(agent, input_rx, output_tx));
@@ -201,15 +228,27 @@ async fn run(args: Args) -> Result<()> {
         let cancel: Option<Cancel> = None;
         let spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
 
+        #[cfg(feature = "capture")]
+        let capture = if prompt.mode() == PromptMode::Audio {
+            Some(start_capture(&audio_args, input_tx.clone())?)
+        } else {
+            None
+        };
+
         State {
             screen,
             events,
             input_tx,
             output_rx,
             messages,
+            pending: None,
             spinner,
             cancel,
             prompt,
+            #[cfg(feature = "capture")]
+            audio_args,
+            #[cfg(feature = "capture")]
+            capture,
         }
     };
 
@@ -220,6 +259,9 @@ async fn run(args: Args) -> Result<()> {
         let mut messages = VStack::new().spacing(1);
         for m in &mut state.messages {
             messages = messages.add(m);
+        }
+        if let Some(p) = &mut state.pending {
+            messages = messages.add(p);
         }
         frame.add(&mut messages);
 
@@ -235,20 +277,22 @@ async fn run(args: Args) -> Result<()> {
         tokio::select! {
             Some(result) = state.events.next(&mut state.screen) => {
                 match result? {
-                    ScreenEvent::Interrupt => {
-                        if !state.prompt.is_empty() {
-                            state.prompt.clear();
-                        } else if let Some(cancel) = state.cancel.take() {
-                            cancel.cancel();
-                        } else {
+                    ScreenEvent::Signal(signal) => match signal {
+                        Signal::Interrupt => {
+                            if !state.prompt.is_empty() {
+                                state.prompt.clear();
+                            } else if let Some(cancel) = state.cancel.take() {
+                                cancel.cancel();
+                            } else {
+                                break;
+                            }
+                        }
+                        Signal::Suspend => {
+                            continue;
+                        }
+                        Signal::Quit => {
                             break;
                         }
-                    }
-                    ScreenEvent::Suspend => {
-                        continue;
-                    }
-                    ScreenEvent::Quit => {
-                        break;
                     }
                     ScreenEvent::Event(Event::Key(KeyEvent {
                         code: KeyCode::Tab,
@@ -256,6 +300,19 @@ async fn run(args: Args) -> Result<()> {
                         ..
                     })) => {
                         state.prompt.toggle_mode();
+                        #[cfg(feature = "capture")]
+                        match state.prompt.mode() {
+                            PromptMode::Audio => {
+                                state.capture = Some(start_capture(
+                                    &state.audio_args,
+                                    state.input_tx.clone(),
+                                )?);
+                            }
+                            PromptMode::Text => {
+                                state.capture = None;
+                                state.prompt.clear_transcription();
+                            }
+                        }
                         continue;
                     }
                     ScreenEvent::Event(event) => {
@@ -266,7 +323,7 @@ async fn run(args: Args) -> Result<()> {
                         };
                         match action {
                             EditorAction::Submit(text) => {
-                                let _ = state.input_tx.send(text).await;
+                                let _ = state.input_tx.send(Input::Text(text)).await;
                             }
                             EditorAction::Eof => break,
                         }
@@ -275,28 +332,50 @@ async fn run(args: Args) -> Result<()> {
             }
             Some(output) = state.output_rx.recv() => {
                 match output {
-                    AgentEvent::Starting { text, cancel } => {
-                        state.messages.push(Message::user(&text));
-                        state.messages.push(Message::assistant());
+                    AgentEvent::Starting { cancel } => {
                         state.cancel = Some(cancel);
                     }
-                    AgentEvent::Output(OutputEvent::Response(event)) => {
+                    AgentEvent::Output(OutputEvent::Delta(ref entry)) => {
                         state.spinner.step();
-                        if let Some(message) = state.messages.last_mut() {
-                            message.push_event(&event);
+                        match entry {
+                            Entry::Message(m)
+                                if matches!(m.role, EntryRole::User) =>
+                            {
+                                // Transcription in progress — show in prompt
+                                if let Some(MessageContent::Text { text }) =
+                                    m.content.first()
+                                {
+                                    state.prompt.set_transcription(text);
+                                }
+                            }
+                            _ => {
+                                // Assistant content streaming
+                                state.pending =
+                                    Some(Message::from_entry(entry));
+                            }
                         }
                     }
-                    AgentEvent::Output(OutputEvent::Transcription(_)) => {
-                        // Transcription events are surfaced live by the
-                        // audio input source, not by the agent loop's
-                        // message list. Ignore them here for now.
+                    AgentEvent::Output(OutputEvent::Entry(ref entry)) => {
                         state.spinner.step();
+                        if let Entry::Message(m) = entry {
+                            if matches!(m.role, EntryRole::User) {
+                                state.prompt.clear_transcription();
+                            }
+                        }
+                        state.pending = None;
+                        state.messages.push(Message::from_entry(entry));
                     }
                     AgentEvent::TurnDone => {
                         state.cancel = None;
+                        state.pending = None;
+                        state.prompt.clear_transcription();
                     }
                     AgentEvent::Error(e) => {
                         state.cancel = None;
+                        state.prompt.clear_transcription();
+                        if let Some(pending) = state.pending.take() {
+                            state.messages.push(pending);
+                        }
                         if let Some(message) = state.messages.last_mut() {
                             message.push_error(&e);
                         }

@@ -1,4 +1,4 @@
-use agent::provider::ResponseEvent;
+use agent::entry::{self, Entry, MessageContent};
 
 use crate::widget::{Block, Paragraph, VerticalBorder, Widget};
 
@@ -13,36 +13,55 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn user(text: &str) -> Self {
-        Self {
-            role: Role::User,
-            text: text.to_string(),
-        }
-    }
-
-    pub fn assistant() -> Self {
-        Self {
-            role: Role::Assistant,
-            text: String::new(),
-        }
-    }
-
-    pub fn push_event(&mut self, event: &ResponseEvent) {
-        match event {
-            ResponseEvent::TextDelta(delta) => {
-                self.text.push_str(delta);
+    /// Build a renderable message from any [`Entry`].
+    pub fn from_entry(entry: &Entry) -> Self {
+        match entry {
+            Entry::Message(m) => {
+                let role = match m.role {
+                    entry::Role::User => Role::User,
+                    _ => Role::Assistant,
+                };
+                let text = m
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        MessageContent::Text { text } => Some(text.as_str()),
+                        MessageContent::Refusal { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                Self { role, text }
             }
-            ResponseEvent::ToolCall(tc) => {
-                self.ensure_newline();
-                self.text
-                    .push_str(&format!("[call {}({})]", tc.name, tc.arguments));
-                self.text.push('\n');
+            Entry::Reasoning(r) => {
+                let text = r
+                    .content
+                    .as_ref()
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .map(|c| c.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+                Self {
+                    role: Role::Assistant,
+                    text,
+                }
             }
-            ResponseEvent::ToolResult(tr) => {
-                self.text.push_str(&format!("[result: {}]", tr.output));
-                self.text.push('\n');
-            }
-            _ => {}
+            Entry::ToolCall(tc) => Self {
+                role: Role::Assistant,
+                text: format!("[call {}({})]", tc.name, tc.arguments),
+            },
+            Entry::ToolResult(tr) => Self {
+                role: Role::Assistant,
+                text: format!("[result: {}]", tr.output),
+            },
+            Entry::Compaction(_) => Self {
+                role: Role::Assistant,
+                text: String::new(),
+            },
         }
     }
 
@@ -81,10 +100,29 @@ impl Widget for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent::entry;
+
+    fn user_entry(text: &str) -> Entry {
+        Entry::Message(entry::Message {
+            role: entry::Role::User,
+            content: vec![entry::MessageContent::Text {
+                text: text.to_string(),
+            }],
+        })
+    }
+
+    fn assistant_entry(text: &str) -> Entry {
+        Entry::Message(entry::Message {
+            role: entry::Role::Assistant,
+            content: vec![entry::MessageContent::Text {
+                text: text.to_string(),
+            }],
+        })
+    }
 
     #[test]
     fn user_render() {
-        let mut msg = Message::user("hello world this is a test");
+        let mut msg = Message::from_entry(&user_entry("hello world this is a test"));
         let lines = msg.render(20);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("> hello world this"));
@@ -93,10 +131,7 @@ mod tests {
 
     #[test]
     fn assistant_render() {
-        let mut msg = Message {
-            role: Role::Assistant,
-            text: "short".to_string(),
-        };
+        let mut msg = Message::from_entry(&assistant_entry("short"));
         let lines = msg.render(80);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("| short"));
@@ -104,7 +139,7 @@ mod tests {
 
     #[test]
     fn empty_assistant_render() {
-        let mut msg = Message::assistant();
+        let mut msg = Message::from_entry(&assistant_entry(""));
         let lines = msg.render(80);
         assert!(lines.is_empty());
     }

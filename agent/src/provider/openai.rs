@@ -171,13 +171,13 @@ impl ResponseProvider for OpenAIProvider {
 
     fn create_response<'a>(
         &'a self,
-        history: &'a [entry::Entry],
+        input: &'a [entry::Entry],
         model: &'a str,
         tools: impl IntoIterator<Item = &'a Tool> + Send + 'a,
     ) -> Pin<Box<dyn Future<Output = ResponseResult<Self::Error>> + Send + 'a>> {
         Box::pin(async move {
             let input = {
-                let items = history.iter().map(InputItem::from).collect();
+                let items = input.iter().map(InputItem::from).collect();
                 InputParam::Items(items)
             };
             let tools: Vec<OpenAITool> = tools.into_iter().map(|t| t.into()).collect();

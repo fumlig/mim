@@ -38,26 +38,23 @@ impl From<&str> for Input {
 
 /// Anything the agent emits while a turn is in flight.
 ///
-/// Each turn produces a sequence of [`OutputEvent`]s. Audio turns may emit
-/// [`OutputEvent::Transcription`] events first, followed by
-/// [`OutputEvent::Response`] events from the model. Text turns only emit
-/// the latter.
+/// Every entry the agent creates — user messages, assistant messages,
+/// reasoning, tool calls, tool results — flows through this enum.
+///
+/// [`OutputEvent::Delta`] carries a partial [`Entry`] that is re-emitted
+/// with the **full** accumulated content on each streaming chunk. The
+/// consumer should *replace* (not append to) whatever it was showing for
+/// the in-progress entry.
+///
+/// [`OutputEvent::Entry`] carries a finalized [`Entry`] that has been
+/// committed to the session.
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
-    Response(ResponseEvent),
-    Transcription(TranscriptionEvent),
-}
-
-impl From<ResponseEvent> for OutputEvent {
-    fn from(event: ResponseEvent) -> Self {
-        OutputEvent::Response(event)
-    }
-}
-
-impl From<TranscriptionEvent> for OutputEvent {
-    fn from(event: TranscriptionEvent) -> Self {
-        OutputEvent::Transcription(event)
-    }
+    /// Partial entry being streamed. Re-emitted with full accumulated
+    /// content on each chunk.
+    Delta(Entry),
+    /// Finalized entry, committed to the session.
+    Entry(Entry),
 }
 
 /// Sample rate expected by [`Input::Audio`] and passed through to the
@@ -117,9 +114,13 @@ where
     /// callback.
     ///
     /// For [`Input::Audio`], the turn begins with a transcription phase
-    /// (emitting [`OutputEvent::Transcription`] events) and then proceeds
-    /// to the response phase as if the transcribed text had been typed.
-    /// For [`Input::Text`], only the response phase runs.
+    /// (emitting [`OutputEvent::Delta`] events with partial user messages)
+    /// and then proceeds to the response phase. For [`Input::Text`], only
+    /// the response phase runs.
+    ///
+    /// Every entry the agent creates — user message, assistant message,
+    /// reasoning, tool calls, tool results — is surfaced as an
+    /// [`OutputEvent`].
     pub async fn run<F>(
         &mut self,
         input: Input,
@@ -132,12 +133,7 @@ where
         let text = match input {
             Input::Text(t) => t,
             Input::Audio(samples) => {
-                match self
-                    .transcribe(&samples, &cancel, |e| {
-                        on_event(OutputEvent::Transcription(e))
-                    })
-                    .await?
-                {
+                match self.transcribe(&samples, &cancel, &mut on_event).await? {
                     Some(t) => t,
                     None => return Ok(()),
                 }
@@ -148,27 +144,28 @@ where
             return Ok(());
         }
 
-        self.respond(&text, &cancel, |e| on_event(OutputEvent::Response(e)))
-            .await
+        self.respond(&text, &cancel, &mut on_event).await
     }
 
     /// Run the response (chat completion) loop for a single user message.
     ///
-    /// Appends the user message to the session, streams model output, and
-    /// automatically loops when the model requests tool calls. Streams
-    /// flat [`ResponseEvent`]s via `on_event`.
+    /// Emits the user message as [`OutputEvent::Entry`], then streams
+    /// model output as [`OutputEvent::Delta`] / [`OutputEvent::Entry`]
+    /// pairs. Automatically loops when the model requests tool calls.
     async fn respond(
         &mut self,
         text: &str,
         cancel: &Cancel,
-        mut on_event: impl FnMut(ResponseEvent),
+        on_event: &mut impl FnMut(OutputEvent),
     ) -> Result<(), anyhow::Error> {
-        self.session.append(Entry::Message(Message {
+        let user_entry = Entry::Message(Message {
             role: Role::User,
             content: vec![MessageContent::Text {
                 text: text.to_string(),
             }],
-        }));
+        });
+        self.session.append(user_entry.clone());
+        on_event(OutputEvent::Entry(user_entry));
 
         loop {
             if cancel.is_cancelled() {
@@ -181,8 +178,9 @@ where
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            let mut pending_entries: Vec<Entry> = Vec::new();
             let mut pending_tool_calls: Vec<entry::ToolCall> = Vec::new();
+            let mut text_acc = String::new();
+            let mut reasoning_acc = String::new();
 
             loop {
                 tokio::select! {
@@ -190,30 +188,55 @@ where
                         let Some(result) = item else { break };
                         let event = result.map_err(|e| anyhow::anyhow!("{e}"))?;
 
-                        match &event {
+                        match event {
+                            ResponseEvent::TextDelta(d) => {
+                                text_acc.push_str(&d);
+                                on_event(OutputEvent::Delta(Entry::Message(Message {
+                                    role: Role::Assistant,
+                                    content: vec![MessageContent::Text {
+                                        text: text_acc.clone(),
+                                    }],
+                                })));
+                            }
                             ResponseEvent::TextDone(msg) => {
-                                pending_entries.push(Entry::Message(msg.clone()));
+                                text_acc.clear();
+                                let entry = Entry::Message(msg);
+                                self.session.append(entry.clone());
+                                on_event(OutputEvent::Entry(entry));
+                            }
+                            ResponseEvent::ReasoningDelta(d) => {
+                                reasoning_acc.push_str(&d);
+                                on_event(OutputEvent::Delta(Entry::Reasoning(entry::Reasoning {
+                                    id: String::new(),
+                                    summary: vec![],
+                                    content: Some(vec![entry::ReasoningContent {
+                                        text: reasoning_acc.clone(),
+                                    }]),
+                                    encrypted_content: None,
+                                })));
                             }
                             ResponseEvent::ReasoningDone(r) => {
-                                pending_entries.push(Entry::Reasoning(r.clone()));
+                                reasoning_acc.clear();
+                                let entry = Entry::Reasoning(r);
+                                self.session.append(entry.clone());
+                                on_event(OutputEvent::Entry(entry));
                             }
                             ResponseEvent::ToolCall(tc) => {
-                                pending_entries.push(Entry::ToolCall(tc.clone()));
                                 pending_tool_calls.push(tc.clone());
+                                let entry = Entry::ToolCall(tc);
+                                self.session.append(entry.clone());
+                                on_event(OutputEvent::Entry(entry));
                             }
-                            _ => {}
+                            ResponseEvent::ToolResult(_) => {
+                                // Not emitted by the provider stream;
+                                // tool results are generated below.
+                            }
                         }
-
-                        on_event(event);
                     }
                     _ = cancel.cancelled() => {
                         break;
                     }
                 }
-            }
-
-            for entry in pending_entries {
-                self.session.append(entry);
             }
 
             if cancel.is_cancelled() || pending_tool_calls.is_empty() {
@@ -236,22 +259,24 @@ where
                     output,
                 };
 
-                on_event(ResponseEvent::ToolResult(result.clone()));
-                self.session.append(Entry::ToolResult(result));
+                let entry = Entry::ToolResult(result);
+                self.session.append(entry.clone());
+                on_event(OutputEvent::Entry(entry));
             }
         }
 
         Ok(())
     }
 
-    /// Transcribe `samples` through the transcription provider, streaming
-    /// [`TranscriptionEvent`]s via `on_event`. Returns the final text on
-    /// success, or `None` if cancelled before a result arrived.
+    /// Transcribe `samples` through the transcription provider, emitting
+    /// [`OutputEvent::Delta`] events with partial user messages as text
+    /// arrives. Returns the final text on success, or `None` if cancelled
+    /// before a result arrived.
     async fn transcribe(
         &self,
         samples: &[i16],
         cancel: &Cancel,
-        mut on_event: impl FnMut(TranscriptionEvent),
+        on_event: &mut impl FnMut(OutputEvent),
     ) -> Result<Option<String>, anyhow::Error> {
         if cancel.is_cancelled() {
             return Ok(None);
@@ -274,12 +299,17 @@ where
                     match &event {
                         TranscriptionEvent::Delta(d) => {
                             accumulated.push_str(d);
+                            on_event(OutputEvent::Delta(Entry::Message(Message {
+                                role: Role::User,
+                                content: vec![MessageContent::Text {
+                                    text: accumulated.clone(),
+                                }],
+                            })));
                         }
                         TranscriptionEvent::Done(text) => {
                             final_text = Some(text.clone());
                         }
                     }
-                    on_event(event);
                 }
                 _ = cancel.cancelled() => {
                     return Ok(None);

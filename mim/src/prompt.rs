@@ -41,6 +41,7 @@ impl PromptMode {
 pub struct Prompt {
     editor: Editor,
     mode: PromptMode,
+    transcription: String,
 }
 
 impl Prompt {
@@ -48,6 +49,7 @@ impl Prompt {
         Self {
             editor: Editor::new(),
             mode,
+            transcription: String::new(),
         }
     }
 
@@ -76,6 +78,16 @@ impl Prompt {
         self.editor.clear();
     }
 
+    /// Set the transcription preview text (replaces previous content).
+    pub fn set_transcription(&mut self, text: &str) {
+        self.transcription = text.to_string();
+    }
+
+    /// Clear the transcription preview.
+    pub fn clear_transcription(&mut self) {
+        self.transcription.clear();
+    }
+
     /// Feed a terminal event into the underlying editor.
     pub fn handle(&mut self, event: Event) -> Option<EditorAction> {
         self.editor.handle(event)
@@ -95,12 +107,19 @@ impl Widget for Prompt {
                 .block()
                 .pad_top(1)
                 .render(width),
-            PromptMode::Audio => Paragraph::new("audio")
-                .block()
-                .top(HorizontalBorder::line())
-                .block()
-                .pad_top(1)
-                .render(width),
+            PromptMode::Audio => {
+                let text = if self.transcription.is_empty() {
+                    "listening..."
+                } else {
+                    &self.transcription
+                };
+                Paragraph::new(text)
+                    .block()
+                    .top(HorizontalBorder::line())
+                    .block()
+                    .pad_top(1)
+                    .render(width)
+            }
         }
     }
 }
