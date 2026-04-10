@@ -22,9 +22,9 @@ use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 use agent::{
-    provider::{openai::OpenAIProvider, Provider, ResponseEvent},
+    provider::{openai::OpenAIProvider, ResponseProvider, TranscriptionProvider},
     session::Session,
-    Agent, Cancel,
+    Agent, Cancel, Input, OutputEvent,
 };
 use tokio::sync::mpsc;
 
@@ -50,6 +50,10 @@ struct Args {
     #[arg(long, env = "MIM_MODEL")]
     model: String,
 
+    /// Transcription model to use for audio input
+    #[arg(long, env = "MIM_STT_MODEL", default_value = "turbo")]
+    stt_model: String,
+
     #[cfg(feature = "capture")]
     #[command(flatten)]
     audio: capture::AudioArgs,
@@ -71,20 +75,22 @@ enum AgentEvent {
     /// The agent is about to process this input.
     Starting { text: String, cancel: Cancel },
     /// A streaming event from the agent.
-    Response(ResponseEvent),
+    Output(OutputEvent),
     /// The current turn completed.
     TurnDone,
     /// An error occurred during the turn.
     Error(String),
 }
 
-async fn agent_task<P>(
-    mut agent: Agent<P>,
+async fn agent_task<R, T>(
+    mut agent: Agent<R, T>,
     mut input_rx: mpsc::Receiver<String>,
     output_tx: mpsc::UnboundedSender<AgentEvent>,
 ) where
-    P: Provider + Send + 'static,
-    P::Error: std::fmt::Display + Send + Sync + 'static,
+    R: ResponseProvider + Send + 'static,
+    T: TranscriptionProvider + Send + 'static,
+    R::Error: std::fmt::Display + Send + Sync + 'static,
+    T::Error: std::fmt::Display + Send + Sync + 'static,
 {
     while let Some(text) = input_rx.recv().await {
         let cancel = Cancel::new();
@@ -100,8 +106,8 @@ async fn agent_task<P>(
 
         let tx = output_tx.clone();
         let result = agent
-            .run(&text, cancel, move |event| {
-                let _ = tx.send(AgentEvent::Response(event));
+            .run(Input::Text(text), cancel, move |event| {
+                let _ = tx.send(AgentEvent::Output(event));
             })
             .await;
 
@@ -128,7 +134,6 @@ struct State {
 }
 
 async fn run(args: Args) -> Result<()> {
-    /*
     #[cfg(feature = "capture")]
     {
         use crate::capture::{self, AudioCapture};
@@ -158,18 +163,25 @@ async fn run(args: Args) -> Result<()> {
 
         println!("ending listen");
     }
-    */
 
     let mut state = {
         let ctx = Context::new(args.path)?;
         debug!(root=?ctx.root, cwd=?ctx.cwd, "mim context");
 
         let agent = {
-            let provider = OpenAIProvider::new();
+            let response_provider = OpenAIProvider::new();
+            let transcription_provider = OpenAIProvider::new();
             let tools = tool::make_tools()?;
             let session = Session::open(ctx.session_path)?;
 
-            Agent::new(provider, args.model, tools, session)
+            Agent::new(
+                response_provider,
+                transcription_provider,
+                args.model,
+                args.stt_model,
+                tools,
+                session,
+            )
         };
 
         let (input_tx, output_rx) = {
@@ -268,11 +280,17 @@ async fn run(args: Args) -> Result<()> {
                         state.messages.push(Message::assistant());
                         state.cancel = Some(cancel);
                     }
-                    AgentEvent::Response(event) => {
+                    AgentEvent::Output(OutputEvent::Response(event)) => {
                         state.spinner.step();
                         if let Some(message) = state.messages.last_mut() {
                             message.push_event(&event);
                         }
+                    }
+                    AgentEvent::Output(OutputEvent::Transcription(_)) => {
+                        // Transcription events are surfaced live by the
+                        // audio input source, not by the agent loop's
+                        // message list. Ignore them here for now.
+                        state.spinner.step();
                     }
                     AgentEvent::TurnDone => {
                         state.cancel = None;

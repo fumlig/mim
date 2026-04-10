@@ -4,18 +4,27 @@ use crate::tool::Tool;
 use std::future::Future;
 use std::pin::Pin;
 
-use super::{Provider, ResponseEvent, ResponseResult};
+use super::{
+    ResponseEvent, ResponseProvider, ResponseResult, TranscriptionEvent, TranscriptionProvider,
+    TranscriptionResult, TranscriptionStream,
+};
 use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     traits::EventType,
-    types::responses::{
-        CompactionSummaryItemParam, CreateResponseArgs, FunctionCallOutput,
-        FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
-        InputMessage, InputParam, InputRole, InputTextContent, Item, MessageItem, OutputItem,
-        OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, ReasoningItem,
-        ReasoningTextContent, RefusalContent, ResponseStreamEvent, SummaryPart, SummaryTextContent,
-        Tool as OpenAITool,
+    types::{
+        audio::{
+            AudioInput, AudioResponseFormat, CreateTranscriptionRequestArgs,
+            CreateTranscriptionResponseStreamEvent,
+        },
+        responses::{
+            CompactionSummaryItemParam, CreateResponseArgs, FunctionCallOutput,
+            FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
+            InputMessage, InputParam, InputRole, InputTextContent, Item, MessageItem, OutputItem,
+            OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, ReasoningItem,
+            ReasoningTextContent, RefusalContent, ResponseStreamEvent, SummaryPart,
+            SummaryTextContent, Tool as OpenAITool,
+        },
     },
     Client,
 };
@@ -157,7 +166,7 @@ impl OpenAIProvider {
     }
 }
 
-impl Provider for OpenAIProvider {
+impl ResponseProvider for OpenAIProvider {
     type Error = OpenAIError;
 
     fn create_response<'a>(
@@ -268,4 +277,89 @@ impl Provider for OpenAIProvider {
             Ok(stream)
         })
     }
+}
+
+impl TranscriptionProvider for OpenAIProvider {
+    type Error = OpenAIError;
+
+    fn create_transcription<'a>(
+        &'a self,
+        samples: &'a [i16],
+        sample_rate: u32,
+        model: &'a str,
+    ) -> Pin<Box<dyn Future<Output = TranscriptionResult<Self::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            // Encode PCM synchronously so the future owns the bytes and
+            // doesn't need to borrow `samples` across awaits.
+            let wav = encode_wav_mono_i16(samples, sample_rate);
+
+            let request = CreateTranscriptionRequestArgs::default()
+                .file(AudioInput::from_bytes("speech.wav".to_string(), wav.into()))
+                .model(model.to_string())
+                .response_format(AudioResponseFormat::Json)
+                .stream(true)
+                .build()?;
+
+            let raw = self
+                .client
+                .audio()
+                .transcription()
+                .create_stream(request)
+                .await?;
+
+            let mapped = raw.filter_map(|result| async {
+                match result {
+                    Ok(CreateTranscriptionResponseStreamEvent::TranscriptTextDelta(e)) => {
+                        Some(Ok(TranscriptionEvent::Delta(e.delta)))
+                    }
+                    Ok(CreateTranscriptionResponseStreamEvent::TranscriptTextDone(e)) => {
+                        Some(Ok(TranscriptionEvent::Done(e.text)))
+                    }
+                    Ok(event) => {
+                        debug!(r#type = ?event.event_type(), "ignoring transcription event");
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                }
+            });
+
+            let stream: TranscriptionStream<Self::Error> = Box::pin(mapped);
+            Ok(stream)
+        })
+    }
+}
+
+/// Encode mono PCM `i16` samples at `sample_rate` Hz into an in-memory WAV
+/// (RIFF/WAVE) byte buffer. 44-byte header + raw little-endian samples.
+fn encode_wav_mono_i16(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+    let channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate: u32 = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align: u16 = channels * bits_per_sample / 8;
+    let data_len: u32 = (samples.len() * 2) as u32;
+    let riff_len: u32 = 36 + data_len;
+
+    let mut buf = Vec::with_capacity(44 + data_len as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&riff_len.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+
+    // fmt  chunk (PCM)
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+    // data chunk
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        buf.extend_from_slice(&s.to_le_bytes());
+    }
+
+    buf
 }

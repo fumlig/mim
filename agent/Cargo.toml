@@ -8,7 +8,7 @@ openai = ["dep:async-openai"]
 
 [dependencies]
 anyhow = "1.0.102"
-async-openai = { version = "0.34", features = ["responses"], optional = true }
+async-openai = { version = "0.34", features = ["responses", "audio"], optional = true }
 futures = "0.3.32"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
