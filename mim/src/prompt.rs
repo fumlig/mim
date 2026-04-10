@@ -16,6 +16,17 @@ use crate::widget::{Editor, HorizontalBorder, Paragraph, Widget, WidgetExt};
 // whole prompt API surface.
 pub use crate::widget::EditorAction;
 
+/// Voice activity status, used in audio mode to provide feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceStatus {
+    /// No speech detected — prompt the user to speak.
+    Silence,
+    /// Speech detected — actively recording.
+    Listening,
+    /// Speech ended — transcribing and/or generating a response.
+    Processing,
+}
+
 /// Prompt input mode. Also used by the CLI to pick the starting mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "snake_case")]
@@ -42,6 +53,7 @@ pub struct Prompt {
     editor: Editor,
     mode: PromptMode,
     transcription: String,
+    voice_status: VoiceStatus,
 }
 
 impl Prompt {
@@ -50,6 +62,7 @@ impl Prompt {
             editor: Editor::new(),
             mode,
             transcription: String::new(),
+            voice_status: VoiceStatus::Silence,
         }
     }
 
@@ -76,6 +89,11 @@ impl Prompt {
     /// Clear the input buffer.
     pub fn clear(&mut self) {
         self.editor.clear();
+    }
+
+    /// Set the current voice activity status.
+    pub fn set_voice_status(&mut self, status: VoiceStatus) {
+        self.voice_status = status;
     }
 
     /// Set the transcription preview text (replaces previous content).
@@ -108,10 +126,14 @@ impl Widget for Prompt {
                 .pad_top(1)
                 .render(width),
             PromptMode::Audio => {
-                let text = if self.transcription.is_empty() {
-                    "listening..."
-                } else {
+                let text = if !self.transcription.is_empty() {
                     &self.transcription
+                } else {
+                    match self.voice_status {
+                        VoiceStatus::Silence => "speak...",
+                        VoiceStatus::Listening => "recording...",
+                        VoiceStatus::Processing => "processing...",
+                    }
                 };
                 Paragraph::new(text)
                     .block()

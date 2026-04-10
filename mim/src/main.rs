@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     message::Message,
-    prompt::{EditorAction, Prompt, PromptMode},
+    prompt::{EditorAction, Prompt, PromptMode, VoiceStatus},
     screen::{EventStream, Screen, ScreenEvent, Signal},
     widget::{Spinner, VStack},
 };
@@ -138,6 +138,7 @@ impl Drop for CaptureHandle {
 fn start_capture(
     audio_args: &capture::AudioArgs,
     input_tx: Sender<Input>,
+    voice_tx: mpsc::UnboundedSender<VoiceStatus>,
 ) -> Result<CaptureHandle> {
     use crate::capture::AudioCapture;
     use crate::voice::{VoiceDetector, VoiceEvent};
@@ -155,9 +156,15 @@ fn start_capture(
     let task = tokio::spawn(async move {
         let mut events = detector.detect(audio);
         while let Some(event) = events.next().await {
-            if let VoiceEvent::SpeechEnd(samples) = event {
-                if input_tx.send(Input::Audio(samples)).await.is_err() {
-                    break;
+            match event {
+                VoiceEvent::SpeechStart => {
+                    let _ = voice_tx.send(VoiceStatus::Listening);
+                }
+                VoiceEvent::SpeechEnd(samples) => {
+                    let _ = voice_tx.send(VoiceStatus::Processing);
+                    if input_tx.send(Input::Audio(samples)).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -180,6 +187,10 @@ struct State {
     spinner: Spinner,
     cancel: Option<Cancel>,
     prompt: Prompt,
+
+    voice_rx: mpsc::UnboundedReceiver<VoiceStatus>,
+    #[allow(dead_code)]
+    voice_tx: mpsc::UnboundedSender<VoiceStatus>,
 
     #[cfg(feature = "capture")]
     audio_args: capture::AudioArgs,
@@ -228,9 +239,11 @@ async fn run(args: Args) -> Result<()> {
         let cancel: Option<Cancel> = None;
         let spinner = Spinner::cycle(Spinner::ASCII.iter().copied());
 
+        let (voice_tx, voice_rx) = mpsc::unbounded_channel::<VoiceStatus>();
+
         #[cfg(feature = "capture")]
         let capture = if prompt.mode() == PromptMode::Audio {
-            Some(start_capture(&audio_args, input_tx.clone())?)
+            Some(start_capture(&audio_args, input_tx.clone(), voice_tx.clone())?)
         } else {
             None
         };
@@ -245,6 +258,8 @@ async fn run(args: Args) -> Result<()> {
             spinner,
             cancel,
             prompt,
+            voice_rx,
+            voice_tx,
             #[cfg(feature = "capture")]
             audio_args,
             #[cfg(feature = "capture")]
@@ -303,9 +318,11 @@ async fn run(args: Args) -> Result<()> {
                         #[cfg(feature = "capture")]
                         match state.prompt.mode() {
                             PromptMode::Audio => {
+                                state.prompt.set_voice_status(VoiceStatus::Silence);
                                 state.capture = Some(start_capture(
                                     &state.audio_args,
                                     state.input_tx.clone(),
+                                    state.voice_tx.clone(),
                                 )?);
                             }
                             PromptMode::Text => {
@@ -369,18 +386,25 @@ async fn run(args: Args) -> Result<()> {
                         state.cancel = None;
                         state.pending = None;
                         state.prompt.clear_transcription();
+                        state.prompt.set_voice_status(VoiceStatus::Silence);
                     }
                     AgentEvent::Error(e) => {
                         state.cancel = None;
                         state.prompt.clear_transcription();
+                        state.prompt.set_voice_status(VoiceStatus::Silence);
                         if let Some(pending) = state.pending.take() {
                             state.messages.push(pending);
                         }
                         if let Some(message) = state.messages.last_mut() {
                             message.push_error(&e);
+                        } else {
+                            state.messages.push(Message::error(&e));
                         }
                     }
                 }
+            }
+            Some(status) = state.voice_rx.recv() => {
+                state.prompt.set_voice_status(status);
             }
         }
     }

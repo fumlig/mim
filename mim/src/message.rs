@@ -65,6 +65,14 @@ impl Message {
         }
     }
 
+    /// Create a standalone error message (not attached to any entry).
+    pub fn error(text: &str) -> Self {
+        Self {
+            role: Role::Assistant,
+            text: format!("[error: {}]", text),
+        }
+    }
+
     pub fn push_error(&mut self, error: &str) {
         self.ensure_newline();
         self.text.push_str(&format!("[error: {}]", error));
