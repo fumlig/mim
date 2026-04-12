@@ -53,5 +53,39 @@ pub trait TranscriptionProvider {
     ) -> Pin<Box<dyn Future<Output = TranscriptionResult<Self::Error>> + Send + 'a>>;
 }
 
+/// A chunk of audio produced by a speech synthesis provider.
+#[derive(Debug, Clone)]
+pub enum SpeechEvent {
+    /// Raw audio bytes (encoding depends on the requested format; typically
+    /// PCM 16-bit LE at 24 kHz mono when using the OpenAI provider).
+    Delta(Vec<u8>),
+    /// Synthesis is complete; no more deltas will follow.
+    Done,
+}
+
+pub type SpeechStream<Error> =
+    Pin<Box<dyn futures::Stream<Item = Result<SpeechEvent, Error>> + Send>>;
+
+pub type SpeechResult<Error> = Result<SpeechStream<Error>, Error>;
+
+/// Provider that turns text into a stream of audio chunks.
+pub trait SpeechProvider {
+    type Error;
+
+    /// Synthesize `text` into audio, streaming chunks as they become
+    /// available.
+    ///
+    /// * `model` — TTS model identifier (e.g. `"gpt-4o-mini-tts"`).
+    /// * `voice` — voice name (e.g. `"alloy"`, `"nova"`).
+    /// * `instructions` — optional style/persona instructions for the voice.
+    fn create_speech<'a>(
+        &'a self,
+        text: &'a str,
+        model: &'a str,
+        voice: &'a str,
+        instructions: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = SpeechResult<Self::Error>> + Send + 'a>>;
+}
+
 #[cfg(feature = "openai")]
 pub mod openai;

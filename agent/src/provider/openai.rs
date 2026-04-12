@@ -5,8 +5,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::{
-    ResponseEvent, ResponseProvider, ResponseResult, TranscriptionEvent, TranscriptionProvider,
-    TranscriptionResult, TranscriptionStream,
+    ResponseEvent, ResponseProvider, ResponseResult, SpeechEvent, SpeechProvider, SpeechResult,
+    SpeechStream, TranscriptionEvent, TranscriptionProvider, TranscriptionResult,
+    TranscriptionStream,
 };
 use async_openai::{
     config::OpenAIConfig,
@@ -14,8 +15,10 @@ use async_openai::{
     traits::EventType,
     types::{
         audio::{
-            AudioInput, AudioResponseFormat, CreateTranscriptionRequestArgs,
-            CreateTranscriptionResponseStreamEvent,
+            AudioInput, AudioResponseFormat, CreateSpeechRequestArgs,
+            CreateSpeechResponseStreamEvent, CreateTranscriptionRequestArgs,
+            CreateTranscriptionResponseStreamEvent, SpeechModel, SpeechResponseFormat,
+            Voice,
         },
         responses::{
             CompactionSummaryItemParam, CreateResponseArgs, FunctionCallOutput,
@@ -324,6 +327,59 @@ impl TranscriptionProvider for OpenAIProvider {
             });
 
             let stream: TranscriptionStream<Self::Error> = Box::pin(mapped);
+            Ok(stream)
+        })
+    }
+}
+
+impl SpeechProvider for OpenAIProvider {
+    type Error = OpenAIError;
+
+    fn create_speech<'a>(
+        &'a self,
+        text: &'a str,
+        model: &'a str,
+        voice: &'a str,
+        instructions: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = SpeechResult<Self::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let speech_model = SpeechModel::Other(model.to_string());
+            let speech_voice = Voice::Other(voice.to_string());
+
+            let mut builder = CreateSpeechRequestArgs::default();
+            builder
+                .input(text)
+                .model(speech_model)
+                .voice(speech_voice)
+                .response_format(SpeechResponseFormat::Pcm);
+
+            if let Some(inst) = instructions {
+                builder.instructions(inst);
+            }
+
+            let request = builder.build()?;
+
+            let raw = self.client.audio().speech().create_stream(request).await?;
+
+            let mapped = raw.filter_map(|result| async {
+                match result {
+                    Ok(CreateSpeechResponseStreamEvent::SpeechAudioDelta(e)) => {
+                        use base64::Engine as _;
+                        match base64::engine::general_purpose::STANDARD.decode(&e.audio) {
+                            Ok(bytes) => Some(Ok(SpeechEvent::Delta(bytes))),
+                            Err(err) => Some(Err(OpenAIError::InvalidArgument(format!(
+                                "invalid base64 in speech delta: {err}"
+                            )))),
+                        }
+                    }
+                    Ok(CreateSpeechResponseStreamEvent::SpeechAudioDone(_)) => {
+                        Some(Ok(SpeechEvent::Done))
+                    }
+                    Err(err) => Some(Err(err)),
+                }
+            });
+
+            let stream: SpeechStream<Self::Error> = Box::pin(mapped);
             Ok(stream)
         })
     }
