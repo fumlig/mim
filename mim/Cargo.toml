@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["capture", "openai"]
+default = ["audio", "openai"]
 openai = ["agent/openai"]
-capture = ["dep:cpal", "dep:ort", "dep:ndarray"]
+audio = ["dep:cpal", "dep:ort", "dep:ndarray"]
 
 [dependencies]
 agent = { path = "../agent" }

@@ -1,14 +1,16 @@
-#[cfg(feature = "capture")]
+#[cfg(feature = "audio")]
 mod capture;
 mod context;
 mod format;
 mod message;
+#[cfg(feature = "audio")]
+mod playback;
 mod prompt;
 mod screen;
-#[cfg(feature = "capture")]
+#[cfg(feature = "audio")]
 mod silero;
 mod tool;
-#[cfg(feature = "capture")]
+#[cfg(feature = "audio")]
 mod voice;
 mod widget;
 
@@ -36,6 +38,117 @@ use crate::{
     widget::{Spinner, VStack},
 };
 
+#[cfg(feature = "audio")]
+fn hosts_help() -> String {
+    use cpal::traits::HostTrait as _;
+    use std::fmt::Write as _;
+    let mut s = String::from("Audio host backend");
+    let hosts = cpal::available_hosts();
+    if !hosts.is_empty() {
+        let default_name = cpal::default_host().id().name();
+        s.push_str("\n\nAvailable:");
+        for id in &hosts {
+            let tag = if id.name() == default_name {
+                " (default)"
+            } else {
+                ""
+            };
+            let _ = write!(s, "\n  {}{tag}", id.name());
+        }
+    }
+    s
+}
+
+#[cfg(feature = "audio")]
+fn input_devices_help() -> String {
+    use cpal::traits::{DeviceTrait as _, HostTrait as _};
+    use std::fmt::Write as _;
+    let mut s = String::from("Audio input device (substring match)");
+    let host = cpal::default_host();
+    if let Ok(devices) = host.input_devices() {
+        let default_id = host.default_input_device().and_then(|d| d.id().ok());
+        s.push_str("\n\nDevices on default host:");
+        let mut any = false;
+        for device in devices {
+            any = true;
+            let name = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_else(|_| "<unknown>".into());
+            let is_default = default_id
+                .as_ref()
+                .and_then(|did| device.id().ok().map(|id| id == *did))
+                .unwrap_or(false);
+            let tag = if is_default { " (default)" } else { "" };
+            let _ = write!(s, "\n  {name}{tag}");
+        }
+        if !any {
+            s.push_str("\n  (none)");
+        }
+    }
+    s
+}
+
+#[cfg(feature = "audio")]
+fn output_devices_help() -> String {
+    use cpal::traits::{DeviceTrait as _, HostTrait as _};
+    use std::fmt::Write as _;
+    let mut s = String::from("Audio output device (substring match)");
+    let host = cpal::default_host();
+    if let Ok(devices) = host.output_devices() {
+        let default_id = host.default_output_device().and_then(|d| d.id().ok());
+        s.push_str("\n\nDevices on default host:");
+        let mut any = false;
+        for device in devices {
+            any = true;
+            let name = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_else(|_| "<unknown>".into());
+            let is_default = default_id
+                .as_ref()
+                .and_then(|did| device.id().ok().map(|id| id == *did))
+                .unwrap_or(false);
+            let tag = if is_default { " (default)" } else { "" };
+            let _ = write!(s, "\n  {name}{tag}");
+        }
+        if !any {
+            s.push_str("\n  (none)");
+        }
+    }
+    s
+}
+
+#[cfg(feature = "audio")]
+#[derive(clap::Args, Debug)]
+struct AudioArgs {
+    /// Audio host backend
+    #[arg(long, long_help = hosts_help())]
+    pub audio_host: Option<String>,
+
+    /// Audio input device (substring match)
+    #[arg(long, env = "MIM_AUDIO_INPUT", long_help = input_devices_help())]
+    pub audio_input: Option<String>,
+
+    /// Audio output device (substring match)
+    #[arg(long, env = "MIM_AUDIO_OUTPUT", long_help = output_devices_help())]
+    pub audio_output: Option<String>,
+
+    /// VAD speech probability threshold (0.0–1.0)
+    #[arg(long, default_value_t = 0.5)]
+    pub vad_threshold: f32,
+
+    /// Seconds without speech before ending a segment
+    #[arg(long, default_value_t = 1.0)]
+    pub vad_silence: f32,
+
+    /// Path to the Silero VAD ONNX model.
+    ///
+    /// Use scripts/download-silero-vad.sh to fetch it.
+    #[arg(long, env = "MIM_VAD_MODEL", default_value = "models/silero_vad.onnx")]
+    pub vad_model: PathBuf,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "mim", version)]
 struct Args {
@@ -55,9 +168,9 @@ struct Args {
     #[arg(long, env = "MIM_STT_MODEL", default_value = "turbo")]
     stt_model: String,
 
-    #[cfg(feature = "capture")]
+    #[cfg(feature = "audio")]
     #[command(flatten)]
-    audio: capture::AudioArgs,
+    audio: AudioArgs,
 }
 
 #[tokio::main]
@@ -121,22 +234,22 @@ async fn agent_task<R, T>(
     }
 }
 
-#[cfg(feature = "capture")]
+#[cfg(feature = "audio")]
 struct CaptureHandle {
     _guard: capture::AudioGuard,
     task: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(feature = "capture")]
+#[cfg(feature = "audio")]
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
-#[cfg(feature = "capture")]
+#[cfg(feature = "audio")]
 fn start_capture(
-    audio_args: &capture::AudioArgs,
+    audio_args: &AudioArgs,
     input_tx: Sender<Input>,
     voice_tx: mpsc::UnboundedSender<VoiceStatus>,
 ) -> Result<CaptureHandle> {
@@ -145,7 +258,7 @@ fn start_capture(
     use futures::StreamExt;
 
     let host = capture::resolve_host(audio_args.audio_host.as_deref())?;
-    let device = capture::resolve_device(&host, audio_args.audio_device.as_deref())?;
+    let device = capture::resolve_device(&host, audio_args.audio_input.as_deref())?;
     let (audio, guard) = AudioCapture::new(device)?.stream()?;
     let detector = VoiceDetector::new(
         audio_args.vad_threshold,
@@ -176,6 +289,26 @@ fn start_capture(
     })
 }
 
+#[cfg(feature = "audio")]
+struct PlaybackHandle {
+    #[allow(dead_code)]
+    sender: playback::PlaybackSender,
+    _guard: playback::PlaybackGuard,
+}
+
+#[cfg(feature = "audio")]
+fn start_playback(audio_args: &AudioArgs) -> Result<PlaybackHandle> {
+    let host = capture::resolve_host(audio_args.audio_host.as_deref())?;
+    let device = playback::resolve_output_device(&host, audio_args.audio_output.as_deref())?;
+    let pb = playback::AudioPlayback::new(device)?;
+    tracing::debug!(device = pb.device_name(), "playback device");
+    let (sender, guard) = pb.start()?;
+    Ok(PlaybackHandle {
+        sender,
+        _guard: guard,
+    })
+}
+
 struct State {
     screen: Screen,
     events: EventStream,
@@ -192,14 +325,16 @@ struct State {
     #[allow(dead_code)]
     voice_tx: mpsc::UnboundedSender<VoiceStatus>,
 
-    #[cfg(feature = "capture")]
-    audio_args: capture::AudioArgs,
-    #[cfg(feature = "capture")]
+    #[cfg(feature = "audio")]
+    audio_args: AudioArgs,
+    #[cfg(feature = "audio")]
     capture: Option<CaptureHandle>,
+    #[cfg(feature = "audio")]
+    playback: Option<PlaybackHandle>,
 }
 
 async fn run(args: Args) -> Result<()> {
-    #[cfg(feature = "capture")]
+    #[cfg(feature = "audio")]
     let audio_args = args.audio;
 
     let mut state = {
@@ -241,9 +376,16 @@ async fn run(args: Args) -> Result<()> {
 
         let (voice_tx, voice_rx) = mpsc::unbounded_channel::<VoiceStatus>();
 
-        #[cfg(feature = "capture")]
+        #[cfg(feature = "audio")]
         let capture = if prompt.mode() == PromptMode::Audio {
             Some(start_capture(&audio_args, input_tx.clone(), voice_tx.clone())?)
+        } else {
+            None
+        };
+
+        #[cfg(feature = "audio")]
+        let playback = if prompt.mode() == PromptMode::Audio {
+            Some(start_playback(&audio_args)?)
         } else {
             None
         };
@@ -260,10 +402,12 @@ async fn run(args: Args) -> Result<()> {
             prompt,
             voice_rx,
             voice_tx,
-            #[cfg(feature = "capture")]
+            #[cfg(feature = "audio")]
             audio_args,
-            #[cfg(feature = "capture")]
+            #[cfg(feature = "audio")]
             capture,
+            #[cfg(feature = "audio")]
+            playback,
         }
     };
 
@@ -315,7 +459,7 @@ async fn run(args: Args) -> Result<()> {
                         ..
                     })) => {
                         state.prompt.toggle_mode();
-                        #[cfg(feature = "capture")]
+                        #[cfg(feature = "audio")]
                         match state.prompt.mode() {
                             PromptMode::Audio => {
                                 state.prompt.set_voice_status(VoiceStatus::Silence);
@@ -324,9 +468,11 @@ async fn run(args: Args) -> Result<()> {
                                     state.input_tx.clone(),
                                     state.voice_tx.clone(),
                                 )?);
+                                state.playback = Some(start_playback(&state.audio_args)?);
                             }
                             PromptMode::Text => {
                                 state.capture = None;
+                                state.playback = None;
                                 state.prompt.clear_transcription();
                             }
                         }

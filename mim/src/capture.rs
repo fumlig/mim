@@ -2,8 +2,6 @@ use anyhow::{Context as _, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use futures::Stream;
-use std::fmt::Write as _;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use tokio::sync::mpsc;
@@ -16,76 +14,6 @@ const CHANNELS: u16 = 1;
 const SAMPLE_FORMAT: SampleFormat = SampleFormat::I16;
 /// Maximum number of unread chunks buffered before new chunks are dropped.
 const CHANNEL_CAPACITY: usize = 64;
-
-fn hosts_help() -> String {
-    let mut s = String::from("Audio host backend");
-    let hosts = cpal::available_hosts();
-    if !hosts.is_empty() {
-        let default_name = cpal::default_host().id().name();
-        s.push_str("\n\nAvailable:");
-        for id in &hosts {
-            let tag = if id.name() == default_name {
-                " (default)"
-            } else {
-                ""
-            };
-            let _ = write!(s, "\n  {}{tag}", id.name());
-        }
-    }
-    s
-}
-
-fn devices_help() -> String {
-    let mut s = String::from("Audio input device (substring match)");
-    let host = cpal::default_host();
-    if let Ok(devices) = host.input_devices() {
-        let default_id = host.default_input_device().and_then(|d| d.id().ok());
-        s.push_str("\n\nDevices on default host:");
-        let mut any = false;
-        for device in devices {
-            any = true;
-            let name = device
-                .description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| "<unknown>".into());
-            let is_default = default_id
-                .as_ref()
-                .and_then(|did| device.id().ok().map(|id| id == *did))
-                .unwrap_or(false);
-            let tag = if is_default { " (default)" } else { "" };
-            let _ = write!(s, "\n  {name}{tag}");
-        }
-        if !any {
-            s.push_str("\n  (none)");
-        }
-    }
-    s
-}
-
-#[derive(clap::Args, Debug)]
-pub struct AudioArgs {
-    /// Audio host backend
-    #[arg(long, long_help = hosts_help())]
-    pub audio_host: Option<String>,
-
-    /// Audio input device (substring match)
-    #[arg(long, env = "MIM_DEVICE", long_help = devices_help())]
-    pub audio_device: Option<String>,
-
-    /// VAD speech probability threshold (0.0–1.0)
-    #[arg(long, default_value_t = 0.5)]
-    pub vad_threshold: f32,
-
-    /// Seconds without speech before ending a segment
-    #[arg(long, default_value_t = 1.0)]
-    pub vad_silence: f32,
-
-    /// Path to the Silero VAD ONNX model.
-    ///
-    /// Use scripts/download-silero-vad.sh to fetch it.
-    #[arg(long, env = "MIM_VAD_MODEL", default_value = "models/silero_vad.onnx")]
-    pub vad_model: PathBuf,
-}
 
 /// Resolve a [`cpal::Host`] by name, or return the default.
 pub fn resolve_host(name: Option<&str>) -> Result<cpal::Host> {
